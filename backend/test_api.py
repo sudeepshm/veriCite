@@ -29,6 +29,39 @@ class ApiTests(unittest.TestCase):
         with patch('main.open_access_lookup', new=AsyncMock(side_effect=ValueError('DOI must be provided'))):
             self.assertEqual(self.client.get('/api/evidence/open-access?doi=10.1/test').status_code, 400)
 
+    def test_claims_endpoint_matches_job_report_claims(self):
+        """Ensure /api/verify/{job_id}/claims returns the same claim IDs as the completed job report."""
+        import asyncio
+        from app.pipeline import create_job, run_pipeline
+        from app.database import get_job
+
+        fixture = """Study findings
+Accuracy rose from 50% to 60% in the adult pilot [1].
+
+References
+[1] Rao, M. (2025). Classification accuracy in an adult pilot. Fixture Studies, 1, 1.
+"""
+        job = create_job("test_claims.txt", "text/plain")
+        asyncio.run(
+            run_pipeline(
+                job.job_id,
+                fixture.encode("utf-8"),
+                "test_claims.txt",
+                "text/plain",
+                test_resolver={"[1]": "source-1.txt", "1": "source-1.txt"},
+            )
+        )
+        completed = get_job(job.job_id)
+        self.assertIsNotNone(completed.report)
+        report_claim_ids = [c["claim_id"] for c in completed.report["claims"]]
+
+        res = self.client.get(f"/api/verify/{job.job_id}/claims")
+        self.assertEqual(res.status_code, 200)
+        api_claim_ids = [c["claim_id"] for c in res.json().get("claims", [])]
+
+        self.assertGreater(len(report_claim_ids), 0, "Report must contain claims")
+        self.assertEqual(set(api_claim_ids), set(report_claim_ids), "Claims route must return same claim IDs as report")
+
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_success_and_safe_errors(self):
         good = AsyncMock(return_value=[{'title':'Study','doi':'10.1/test'}])

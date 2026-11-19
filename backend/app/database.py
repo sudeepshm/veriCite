@@ -38,8 +38,14 @@ def _connect() -> sqlite3.Connection:
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS jobs (
-    job_id TEXT PRIMARY KEY,
-    data   TEXT NOT NULL
+    job_id      TEXT PRIMARY KEY,
+    document_id TEXT,
+    data        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_documents (
+    job_id      TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS document_blocks (
@@ -95,9 +101,59 @@ def init_db() -> None:
         conn = _connect()
         try:
             conn.executescript(_DDL)
+            # Migration check: add document_id to jobs if missing
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+            if "document_id" not in cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN document_id TEXT")
             conn.commit()
         finally:
             conn.close()
+
+
+def set_job_document_id(job_id: str, document_id: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO job_documents (job_id, document_id) VALUES (?, ?)",
+                    (job_id, document_id),
+                )
+                conn.execute(
+                    "UPDATE jobs SET document_id = ? WHERE job_id = ?",
+                    (document_id, job_id),
+                )
+        finally:
+            conn.close()
+
+
+def get_document_id_for_job(job_id: str) -> str | None:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT document_id FROM job_documents WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if row and row["document_id"]:
+                return row["document_id"]
+            job_row = conn.execute(
+                "SELECT document_id, data FROM jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if job_row and "document_id" in job_row.keys() and job_row["document_id"]:
+                return job_row["document_id"]
+            if job_row and job_row["data"]:
+                try:
+                    job_obj = json.loads(job_row["data"])
+                    rpt = job_obj.get("report") or {}
+                    if rpt.get("document_id"):
+                        return rpt["document_id"]
+                except Exception:
+                    pass
+        finally:
+            conn.close()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -216,14 +272,41 @@ def save_claims(claims: list[Claim]) -> None:
             conn.close()
 
 
-def get_claims(document_id: str) -> list[Claim]:
+def get_claims(target_id: str) -> list[Claim]:
+    """Retrieve claims by document_id or job_id."""
     with _lock:
         conn = _connect()
         try:
+            # First try direct document_id match
             rows = conn.execute(
                 "SELECT data FROM claims WHERE document_id = ?",
-                (document_id,),
+                (target_id,),
             ).fetchall()
+            if not rows:
+                # If target_id is a job_id, resolve document_id
+                doc_row = conn.execute(
+                    "SELECT document_id FROM job_documents WHERE job_id = ?",
+                    (target_id,),
+                ).fetchone()
+                doc_id = doc_row["document_id"] if doc_row else None
+                if not doc_id:
+                    job_row = conn.execute(
+                        "SELECT document_id, data FROM jobs WHERE job_id = ?",
+                        (target_id,),
+                    ).fetchone()
+                    if job_row and "document_id" in job_row.keys() and job_row["document_id"]:
+                        doc_id = job_row["document_id"]
+                    elif job_row and job_row["data"]:
+                        try:
+                            job_data = json.loads(job_row["data"])
+                            doc_id = (job_data.get("report") or {}).get("document_id")
+                        except Exception:
+                            pass
+                if doc_id:
+                    rows = conn.execute(
+                        "SELECT data FROM claims WHERE document_id = ?",
+                        (doc_id,),
+                    ).fetchall()
         finally:
             conn.close()
     return [Claim.model_validate_json(r["data"]) for r in rows]
@@ -241,8 +324,18 @@ def _link_document_id(link: ClaimReferenceLink) -> str:
     return link.claim_id
 
 
-def save_links(links: list[ClaimReferenceLink]) -> None:
-    rows = [(lk.link_id, lk.claim_id, lk.claim_id, lk.model_dump_json()) for lk in links]
+def save_links(links: list[ClaimReferenceLink], document_id: str | None = None) -> None:
+    rows = []
+    for lk in links:
+        doc_id = document_id
+        if not doc_id:
+            # Parse from claim_id if format is "doc_<document_id>_claim_<n>" or "doc_<document_id>"
+            if lk.claim_id and lk.claim_id.startswith("doc_"):
+                parts = lk.claim_id.split("_")
+                if len(parts) >= 2:
+                    doc_id = parts[1]
+        doc_id = doc_id or lk.claim_id
+        rows.append((lk.link_id, lk.claim_id, doc_id, lk.model_dump_json()))
     with _lock:
         conn = _connect()
         try:
@@ -342,14 +435,14 @@ def get_passages(source_id: str) -> list[Passage]:
 # ---------------------------------------------------------------------------
 
 
-def save_assessment(a: Assessment) -> None:
+def save_assessment(a: Assessment, job_id: str | None = None) -> None:
     with _lock:
         conn = _connect()
         try:
             with conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO assessments (assessment_id, claim_id, job_id, data) VALUES (?, ?, ?, ?)",
-                    (a.assessment_id, a.claim_id, None, a.model_dump_json()),
+                    (a.assessment_id, a.claim_id, job_id, a.model_dump_json()),
                 )
         finally:
             conn.close()
@@ -369,25 +462,30 @@ def get_assessments(claim_id: str) -> list[Assessment]:
 
 
 def get_all_assessments(job_id: str) -> list[Assessment]:
-    """Return all assessments for a job by joining through claims via document_id prefix.
-
-    Assessments store claim_id; claims are keyed by document_id.  We retrieve
-    all claim_ids for the job's document then fetch matching assessments.
-    """
-    # document_id is embedded in job_id by convention: job_<document_id>
-    # but we cannot assume that — instead query all claims whose document_id
-    # matches the job_id (jobs store document_id = job_id when created by the
-    # pipeline).  For robustness we do a simple prefix join in Python.
+    """Return all assessments for a job by job_id or joining through claims via document_id."""
     with _lock:
         conn = _connect()
         try:
-            claim_rows = conn.execute(
-                "SELECT claim_id FROM claims WHERE document_id = ?",
+            # Check if any assessments have direct job_id
+            direct_rows = conn.execute(
+                "SELECT data FROM assessments WHERE job_id = ?",
                 (job_id,),
             ).fetchall()
+            if direct_rows:
+                return [Assessment.model_validate_json(r["data"]) for r in direct_rows]
+
+            # Resolve document_id for job_id
+            doc_row = conn.execute(
+                "SELECT document_id FROM job_documents WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            doc_id = doc_row["document_id"] if doc_row else job_id
+
+            claim_rows = conn.execute(
+                "SELECT claim_id FROM claims WHERE document_id = ? OR document_id = ?",
+                (doc_id, job_id),
+            ).fetchall()
             if not claim_rows:
-                # Fallback: job_id may differ from document_id; return nothing
-                conn.close()
                 return []
             claim_ids = [r["claim_id"] for r in claim_rows]
             placeholders = ",".join("?" * len(claim_ids))
@@ -402,6 +500,8 @@ def get_all_assessments(job_id: str) -> list[Assessment]:
 
 __all__ = [
     "init_db",
+    "set_job_document_id",
+    "get_document_id_for_job",
     "save_job",
     "get_job",
     "save_blocks",

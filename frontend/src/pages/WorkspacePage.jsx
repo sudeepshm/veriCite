@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { Link, useRouter } from '../router';
 import { statuses, sampleText, sampleClaims, extract, report, csv } from '../engine';
-import { checkHealth, submitDocument, getJobStatus, getJobReport } from '../api';
+import { checkHealth, submitDocument, submitDocumentFile, getJobStatus, getJobReport } from '../api';
 import { AcademicSimulationPage } from './AcademicSimulationPage';
 
 function Badge({ status }) {
@@ -128,6 +128,14 @@ export function WorkspacePage({ state, setState, backendOnline }) {
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState(null);
 
+  // Resume active job on page refresh
+  useEffect(() => {
+    const activeJobId = localStorage.getItem('vericite_active_job_id');
+    if (activeJobId && backendOnline && !busy) {
+      pollJob(activeJobId, state.title || 'Resumed document');
+    }
+  }, [backendOnline]);
+
   const update = (patch) => setState((s) => ({ ...s, ...patch }));
 
   const visible = state.claims.filter(
@@ -181,9 +189,217 @@ export function WorkspacePage({ state, setState, backendOnline }) {
     setMessage('Sample restored. Verdicts and evidence are illustrative.');
   };
 
+  const pollJob = async (job_id, docTitle) => {
+    setBusy(true);
+    setStage(null);
+    setMessage('Verification started. Parsing document…');
+    localStorage.setItem('vericite_active_job_id', job_id);
+
+    const stageNames = {
+      1: 'Parsing document…',
+      2: 'Extracting claims & references…',
+      3: 'Resolving references…',
+      4: 'Retrieving source passages…',
+      5: 'Verifying claims against evidence…'
+    };
+
+    const poll = async () => {
+      try {
+        const job = await getJobStatus(job_id);
+        setStage(job.current_stage);
+        if (job.current_stage) setMessage(stageNames[job.current_stage] || 'Processing…');
+
+        if (job.job_state === 'completed') {
+          localStorage.removeItem('vericite_active_job_id');
+          const rpt = job.report || (await getJobReport(job_id));
+          const verdictMap = {
+            SUPPORTED: 'Supported',
+            PARTLY_SUPPORTED: 'Partly supported',
+            CONTRADICTORY: 'Contradictory',
+            UNSUPPORTED: 'Unsupported'
+          };
+          const localExtracted = state.text ? extract(state.text) : [];
+          const claimsList = rpt.claims && rpt.claims.length ? rpt.claims : localExtracted;
+          const assessments = rpt.assessments || [];
+          const links = rpt.links || [];
+          const references = rpt.references || [];
+          const passages = rpt.passages || [];
+          const passageMap = new Map(passages.map((p) => [p.passage_id, p]));
+          const refMap = new Map(references.map((r) => [r.ref_id, r]));
+          const backendClaims = [];
+
+          let assessedCount = 0;
+          let abstainedCount = 0;
+          let failedCount = 0;
+
+          assessments.forEach((a) => {
+            if (a.assessment_status === 'assessed') {
+              assessedCount++;
+            } else if (a.assessment_status === 'unable_to_assess') {
+              abstainedCount++;
+            } else if (a.assessment_status === 'failed') {
+              failedCount++;
+            }
+          });
+
+          claimsList.forEach((c, i) => {
+            const claimText = c.normalized_text || c.original_span || c.claim || `Claim ${i + 1}`;
+            const claimLinks = links.filter((l) => l.claim_id === c.claim_id);
+            if (claimLinks.length > 0) {
+              claimLinks.forEach((lk, linkIdx) => {
+                const asm = lk.ref_id
+                  ? assessments.find((a) => a.claim_id === c.claim_id && a.ref_id === lk.ref_id)
+                  : null;
+                const refObj = lk.ref_id ? refMap.get(lk.ref_id) : null;
+                const markerStr = lk.citation_marker || (refObj && refObj.raw_marker) || '';
+                const refDisplay = refObj
+                  ? `${refObj.raw_marker ? `${refObj.raw_marker} ` : ''}${refObj.authors?.join(', ') || ''} (${refObj.year || ''}) ${refObj.title || ''}`.trim()
+                  : markerStr
+                  ? `Citation ${markerStr}`
+                  : '';
+                let verdict = 'Unverified';
+                let confidence = null;
+                let reason = asm
+                  ? asm.explanation || 'Assessment completed.'
+                  : lk.mapping_status === 'unmatched'
+                  ? `Unmatched citation marker ${lk.citation_marker || ''}.`.trim()
+                  : 'Candidate claim awaiting verification.';
+                let evidence = 'No source passage available.';
+                let section = 'Not available';
+                let flags = asm
+                  ? asm.issue_flags || []
+                  : lk.mapping_status === 'unmatched'
+                  ? ['unmatched_citation']
+                  : [];
+
+                if (asm) {
+                  if (asm.semantic_verdict) {
+                    verdict = verdictMap[asm.semantic_verdict] || 'Unverified';
+                  } else if (asm.assessment_status === 'unable_to_assess') {
+                    verdict = 'Unable to assess';
+                  } else if (asm.assessment_status === 'failed') {
+                    verdict = 'Failed';
+                  }
+                  if (asm.confidence_score != null) {
+                    confidence = asm.confidence_score > 0.7 ? 'High' : asm.confidence_score > 0.4 ? 'Medium' : 'Low';
+                  }
+                  if (asm.evidence_passage_ids && asm.evidence_passage_ids.length > 0) {
+                    const matched = asm.evidence_passage_ids.map((pid) => passageMap.get(pid)).filter(Boolean);
+                    if (matched.length > 0) {
+                      evidence = matched.map((p) => p.verbatim_text).join('\n\n');
+                      section = matched
+                        .map((p) => p.section || (p.page ? `Page ${p.page}` : 'Retrieved passage'))
+                        .join(', ');
+                    }
+                  }
+                }
+
+                backendClaims.push({
+                  id: `${c.claim_id || i + 1}_${lk.ref_id || linkIdx}`,
+                  claimId: c.claim_id,
+                  refId: lk.ref_id,
+                  claim: claimText,
+                  markers: markerStr ? [markerStr] : [],
+                  references: refDisplay ? [refDisplay] : [],
+                  status: verdict,
+                  confidence,
+                  evidence,
+                  section,
+                  reason,
+                  flags,
+                  source:
+                    rpt.sources && lk.ref_id
+                      ? rpt.sources.find((s) => s.ref_id === lk.ref_id)?.source_url || null
+                      : null
+                });
+              });
+            } else {
+              backendClaims.push({
+                id: c.claim_id || `claim-${i + 1}`,
+                claimId: c.claim_id,
+                claim: claimText,
+                markers: [],
+                references: [],
+                status: 'Unverified',
+                confidence: null,
+                evidence: 'No source passage available.',
+                section: 'Not available',
+                reason: 'Candidate claim with no citation markers.',
+                flags: ['missing_citation'],
+                source: null
+              });
+            }
+          });
+
+          // Determine accurate verification mode label
+          let modeLabel = 'Custom document · unverified';
+          if (assessedCount > 0) {
+            modeLabel = 'AI-verified document';
+          } else if (abstainedCount > 0 || failedCount > 0) {
+            modeLabel = 'Partially verified (inconclusive evidence)';
+          }
+
+          setThread([]);
+          setQuestion('');
+          update({
+            claims: backendClaims.length ? backendClaims : localExtracted,
+            analyzedTitle: docTitle || state.title,
+            mode: modeLabel,
+            summary: {
+              totalPairs: assessments.length,
+              assessedCount,
+              abstainedCount,
+              failedCount
+            },
+            stageErrors: rpt.stage_errors || [],
+            assessmentMethod: rpt.sources?.some(s => s.coverage === 'full_text') ? 'Full-text retrieval & semantic verification' : 'Abstract retrieval & rule-based verification',
+            reviews: {},
+            history: []
+          });
+          setSelected(null);
+          setFilter('All verdicts');
+          setQuery('');
+          handleTabClick('Overview');
+          setStage(null);
+          setBusy(false);
+          setMessage(
+            `Verification complete: ${assessedCount} assessed, ${abstainedCount} abstained, ${failedCount} failed.`
+          );
+          return;
+        }
+
+        if (job.job_state === 'failed') {
+          localStorage.removeItem('vericite_active_job_id');
+          setMessage('Verification failed: ' + (job.error_message || 'Unknown error.') + ' Falling back to local extraction.');
+          const c = extract(state.text);
+          update({
+            claims: c,
+            analyzedTitle: docTitle || state.title,
+            mode: 'Custom document · unverified (backend failed)',
+            reviews: {},
+            history: []
+          });
+          setSelected(null);
+          setFilter('All verdicts');
+          setQuery('');
+          handleTabClick('Overview');
+          setStage(null);
+          setBusy(false);
+          return;
+        }
+
+        setTimeout(poll, 2000);
+      } catch (err) {
+        setMessage('Polling error: ' + err.message);
+        setBusy(false);
+      }
+    };
+    await poll();
+  };
+
   const analyze = async () => {
     if (!state.text.trim()) {
-      setMessage('Paste text or upload a TXT/Markdown document first.');
+      setMessage('Paste text or upload a document first.');
       return;
     }
     if (backendOnline) {
@@ -192,178 +408,7 @@ export function WorkspacePage({ state, setState, backendOnline }) {
       setMessage('Submitting document to verification backend…');
       try {
         const { job_id } = await submitDocument(state.text, state.title || 'document.txt');
-        setMessage('Verification started. Parsing document…');
-        const stageNames = {
-          1: 'Parsing document…',
-          2: 'Extracting claims & references…',
-          3: 'Resolving references…',
-          4: 'Retrieving source passages…',
-          5: 'Verifying claims against evidence…'
-        };
-
-        const poll = async () => {
-          try {
-            const job = await getJobStatus(job_id);
-            setStage(job.current_stage);
-            if (job.current_stage) setMessage(stageNames[job.current_stage] || 'Processing…');
-
-            if (job.job_state === 'completed') {
-              const rpt = job.report || (await getJobReport(job_id));
-              const verdictMap = {
-                SUPPORTED: 'Supported',
-                PARTLY_SUPPORTED: 'Partly supported',
-                CONTRADICTORY: 'Contradictory',
-                UNSUPPORTED: 'Unsupported'
-              };
-              const localExtracted = extract(state.text);
-              const claimsList = rpt.claims && rpt.claims.length ? rpt.claims : localExtracted;
-              const assessments = rpt.assessments || [];
-              const links = rpt.links || [];
-              const references = rpt.references || [];
-              const passages = rpt.passages || [];
-              const passageMap = new Map(passages.map((p) => [p.passage_id, p]));
-              const refMap = new Map(references.map((r) => [r.ref_id, r]));
-              const hasAssessments = assessments.length > 0;
-              const backendClaims = [];
-
-              claimsList.forEach((c, i) => {
-                const claimText = c.normalized_text || c.original_span || c.claim || `Claim ${i + 1}`;
-                const claimLinks = links.filter((l) => l.claim_id === c.claim_id);
-                if (claimLinks.length > 0) {
-                  claimLinks.forEach((lk, linkIdx) => {
-                    const asm = lk.ref_id
-                      ? assessments.find((a) => a.claim_id === c.claim_id && a.ref_id === lk.ref_id)
-                      : null;
-                    const refObj = lk.ref_id ? refMap.get(lk.ref_id) : null;
-                    const markerStr = lk.citation_marker || (refObj && refObj.raw_marker) || '';
-                    const refDisplay = refObj
-                      ? `${refObj.raw_marker ? `${refObj.raw_marker} ` : ''}${refObj.authors?.join(', ') || ''} (${refObj.year || ''}) ${refObj.title || ''}`.trim()
-                      : markerStr
-                      ? `Citation ${markerStr}`
-                      : '';
-                    let verdict = 'Unverified';
-                    let confidence = null;
-                    let reason = asm
-                      ? asm.explanation || 'Assessment completed.'
-                      : lk.mapping_status === 'unmatched'
-                      ? `Unmatched citation marker ${lk.citation_marker || ''}.`.trim()
-                      : 'Candidate claim awaiting verification.';
-                    let evidence = 'No source passage available.';
-                    let section = 'Not available';
-                    let flags = asm
-                      ? asm.issue_flags || []
-                      : lk.mapping_status === 'unmatched'
-                      ? ['unmatched_citation']
-                      : [];
-
-                    if (asm) {
-                      if (asm.semantic_verdict) {
-                        verdict = verdictMap[asm.semantic_verdict] || 'Unverified';
-                      } else if (asm.assessment_status === 'unable_to_assess') {
-                        verdict = 'Unable to assess';
-                      } else if (asm.assessment_status === 'failed') {
-                        verdict = 'Failed';
-                      }
-                      if (asm.confidence_score != null) {
-                        confidence = asm.confidence_score > 0.7 ? 'High' : asm.confidence_score > 0.4 ? 'Medium' : 'Low';
-                      }
-                      if (asm.evidence_passage_ids && asm.evidence_passage_ids.length > 0) {
-                        const matched = asm.evidence_passage_ids.map((pid) => passageMap.get(pid)).filter(Boolean);
-                        if (matched.length > 0) {
-                          evidence = matched.map((p) => p.verbatim_text).join('\n\n');
-                          section = matched
-                            .map((p) => p.section || (p.page ? `Page ${p.page}` : 'Retrieved passage'))
-                            .join(', ');
-                        }
-                      }
-                    }
-
-                    backendClaims.push({
-                      id: `${c.claim_id || i + 1}_${lk.ref_id || linkIdx}`,
-                      claimId: c.claim_id,
-                      refId: lk.ref_id,
-                      claim: claimText,
-                      markers: markerStr ? [markerStr] : [],
-                      references: refDisplay ? [refDisplay] : [],
-                      status: verdict,
-                      confidence,
-                      evidence,
-                      section,
-                      reason,
-                      flags,
-                      source:
-                        rpt.sources && lk.ref_id
-                          ? rpt.sources.find((s) => s.ref_id === lk.ref_id)?.source_url || null
-                          : null
-                    });
-                  });
-                } else {
-                  backendClaims.push({
-                    id: c.claim_id || `claim-${i + 1}`,
-                    claimId: c.claim_id,
-                    claim: claimText,
-                    markers: [],
-                    references: [],
-                    status: 'Unverified',
-                    confidence: null,
-                    evidence: 'No source passage available.',
-                    section: 'Not available',
-                    reason: 'Candidate claim with no citation markers.',
-                    flags: ['missing_citation'],
-                    source: null
-                  });
-                }
-              });
-
-              setThread([]);
-              setQuestion('');
-              update({
-                claims: backendClaims.length ? backendClaims : localExtracted,
-                analyzedTitle: state.title,
-                mode: hasAssessments ? 'AI-verified document' : 'Custom document · unverified',
-                reviews: {},
-                history: []
-              });
-              setSelected(null);
-              setFilter('All verdicts');
-              setQuery('');
-              handleTabClick('Overview');
-              setStage(null);
-              setBusy(false);
-              setMessage(
-                hasAssessments
-                  ? `Verification complete: ${assessments.length} claim–reference pairs assessed.`
-                  : `Showing local extraction (${backendClaims.length} candidate claims).`
-              );
-              return;
-            }
-
-            if (job.job_state === 'failed') {
-              setMessage('Verification failed: ' + (job.error_message || 'Unknown error.') + ' Falling back to local extraction.');
-              const c = extract(state.text);
-              update({
-                claims: c,
-                analyzedTitle: state.title,
-                mode: 'Custom document · unverified (backend failed)',
-                reviews: {},
-                history: []
-              });
-              setSelected(null);
-              setFilter('All verdicts');
-              setQuery('');
-              handleTabClick('Overview');
-              setStage(null);
-              setBusy(false);
-              return;
-            }
-
-            setTimeout(poll, 2000);
-          } catch (err) {
-            setMessage('Polling error: ' + err.message);
-            setBusy(false);
-          }
-        };
-        await poll();
+        await pollJob(job_id, state.title || 'document.txt');
       } catch (e) {
         setMessage('Backend error: ' + e.message + '. Using local extraction.');
         const c = extract(state.text);
@@ -410,17 +455,39 @@ export function WorkspacePage({ state, setState, backendOnline }) {
 
   const uploadFile = async (file) => {
     if (!file) return;
-    if (!/\.(txt|md)$/i.test(file.name)) {
-      setMessage('Please use a .txt or .md file. PDF and DOCX parsing are planned for the backend.');
+    if (!/\.(txt|md|pdf|docx)$/i.test(file.name)) {
+      setMessage('Please choose a supported academic file (.txt, .md, .pdf, or .docx).');
       return;
     }
-    if (file.size > 1024 * 1024) {
-      setMessage('Choose a file smaller than 1 MB.');
+    if (file.size > 20 * 1024 * 1024) {
+      setMessage('Choose a file smaller than 20 MB.');
       return;
     }
     setBusy(true);
+
+    // If PDF or DOCX and backend is online, upload directly via multipart binary route
+    if (/\.(pdf|docx)$/i.test(file.name)) {
+      if (!backendOnline) {
+        setMessage('Backend connection is required to parse binary PDF/DOCX documents.');
+        setBusy(false);
+        return;
+      }
+      try {
+        setMessage(`Uploading ${file.name} to server for Docling parsing…`);
+        const { job_id } = await submitDocumentFile(file);
+        update({ title: file.name, text: `[Binary document ${file.name} uploaded for parsing]` });
+        await pollJob(job_id, file.name);
+      } catch (err) {
+        setMessage('Binary upload failed: ' + err.message);
+        setBusy(false);
+      }
+      return;
+    }
+
+    // TXT / Markdown file
     try {
-      update({ text: await file.text(), title: file.name });
+      const content = await file.text();
+      update({ text: content, title: file.name });
       setMessage('Document loaded. Select Extract claims to process it.');
     } catch {
       setMessage('Could not read this file. Try pasting its text.');
@@ -624,7 +691,7 @@ export function WorkspacePage({ state, setState, backendOnline }) {
           ) : activeTab === 'Document' ? (
             <section className="panel document">
               <h2>Upload your paper</h2>
-              <p>Paste academic text with a References section, or import a TXT/Markdown file (up to 1 MB). Docling PDF/DOCX parsing is planned.</p>
+              <p>Paste academic text with a References section, or import a TXT, Markdown, PDF, or DOCX document (up to 20 MB).</p>
 
               <label
                 className="upload"
@@ -635,10 +702,10 @@ export function WorkspacePage({ state, setState, backendOnline }) {
                 }}
               >
                 <Upload size={34} />
-                <strong>{busy ? 'Reading document…' : 'Drop your document here'}</strong>
+                <strong>{busy ? 'Processing document…' : 'Drop your document here (TXT, MD, PDF, DOCX)'}</strong>
                 <input
                   type="file"
-                  accept=".txt,.md"
+                  accept=".txt,.md,.pdf,.docx"
                   disabled={busy}
                   onChange={(e) => {
                     uploadFile(e.target.files[0]);
@@ -799,9 +866,27 @@ export function WorkspacePage({ state, setState, backendOnline }) {
               <section className="stats">
                 {[
                   [state.claims.length, 'Claims extracted', 'Ready for inspection'],
-                  [state.claims.filter((r) => r.status === 'Supported').length, 'Supported', 'Illustrative sample verdicts'],
-                  [state.claims.filter((r) => r.status !== 'Supported').length, 'Need attention', 'Check scope, sources & context'],
-                  [`${reviewed}/${state.claims.length}`, 'Human reviewed', 'Your review progress']
+                  [
+                    state.summary?.assessedCount != null
+                      ? state.summary.assessedCount
+                      : state.claims.filter((r) => r.status === 'Supported').length,
+                    'Assessed pairs',
+                    'Evidence matched'
+                  ],
+                  [
+                    state.summary?.abstainedCount != null
+                      ? state.summary.abstainedCount
+                      : state.claims.filter((r) => r.status === 'Unable to assess').length,
+                    'Abstained pairs',
+                    'Inconclusive evidence'
+                  ],
+                  [
+                    state.summary?.failedCount != null
+                      ? state.summary.failedCount
+                      : state.claims.filter((r) => r.status === 'Failed').length,
+                    'Failed pairs',
+                    'Provider or parse errors'
+                  ]
                 ].map(([n, l, h]) => (
                   <div key={l}>
                     <span>{l}</span>

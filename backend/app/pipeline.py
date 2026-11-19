@@ -27,6 +27,7 @@ from app.models import (
 )
 from app.database import (
     init_db,
+    set_job_document_id,
     save_job,
     get_job,
     save_blocks,
@@ -142,6 +143,7 @@ async def run_pipeline(
             document_id, blocks, bib_warning = await ingest_document(
                 content, filename, content_type
             )
+            set_job_document_id(job_id, document_id)
             if bib_warning:
                 stage_errors.append(f"Stage 1: {bib_warning}")
             save_blocks(blocks)
@@ -162,7 +164,7 @@ async def run_pipeline(
             claims, links, issues = await extract_claims_and_links(blocks, refs)
             stage_errors.extend([f"Stage 2: {i}" for i in issues])
             save_claims(claims)
-            save_links(links)
+            save_links(links, document_id=document_id)
         except Exception as e:
             stage_errors.append(f"Stage 2 error: {e}")
 
@@ -248,7 +250,7 @@ async def run_pipeline(
                     assessment = await assess_claim_reference_pair(
                         claim, source, passages, source.is_retracted
                     )
-                    save_assessment(assessment)
+                    save_assessment(assessment, job_id=job_id)
                     all_assessments.append(assessment)
                 except Exception as e:
                     stage_errors.append(

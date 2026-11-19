@@ -2,7 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -77,6 +77,18 @@ async def verify(req: VerifyRequest):
     content = req.text.encode("utf-8")
     job = create_job(req.filename, "text/plain")
     asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain"))
+    return {"job_id": job.job_id, "status": "queued"}
+
+
+@app.post("/api/verify/upload")
+async def verify_upload(file: UploadFile = File(...)):
+    filename = file.filename or "uploaded_document"
+    content_type = file.content_type or "application/octet-stream"
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    job = create_job(filename, content_type)
+    asyncio.create_task(run_pipeline(job.job_id, content, filename, content_type))
     return {"job_id": job.job_id, "status": "queued"}
 
 

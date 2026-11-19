@@ -17,7 +17,7 @@ import {
   Info
 } from 'lucide-react';
 import { calculateBenchmarkDifference } from '../simulationCalculations';
-import { searchEvidence } from '../api';
+import { searchEvidence, submitDocument } from '../api';
 import { useRouter } from '../router';
 
 const DRAFT_STORAGE_KEY = 'vericite-simulation-v1';
@@ -104,7 +104,9 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
   const [hasSearched, setHasSearched] = useState(false);
   const [saveToast, setSaveToast] = useState(false);
   const [calcFlash, setCalcFlash] = useState(false);
-  const { search } = useRouter();
+  const [isVerifyingPair, setIsVerifyingPair] = useState(false);
+  const [verifyPairStatus, setVerifyPairStatus] = useState(null);
+  const { search, navigate } = useRouter();
 
   // Scroll to Step 4 if ?step=4 in URL
   useEffect(() => {
@@ -248,6 +250,38 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
     updateDraft({
       attachedCitations: draft.attachedCitations.filter((_, idx) => idx !== indexToRemove)
     });
+  };
+
+  // Explicit action: verify attached simulation claim against attached candidate citation
+  const handleVerifyAttachedPair = async (citation) => {
+    const claimText = draft.claim.trim();
+    if (!claimText) {
+      setVerifyPairStatus({ error: 'Please enter a research claim to verify.' });
+      return;
+    }
+    const citRef = citation.doi
+      ? `[1] ${citation.title}. https://doi.org/${citation.doi}`
+      : `[1] ${citation.title}. (${citation.year || '2024'}).`;
+
+    const syntheticDoc = `${claimText} [1].\n\nReferences\n${citRef}`;
+
+    setIsVerifyingPair(true);
+    setVerifyPairStatus({ info: `Submitting claim against "${citation.title}" for verification…` });
+
+    try {
+      const res = await submitDocument(syntheticDoc, `simulation_${citation.doi ? citation.doi.replace(/[^a-zA-Z0-9]/g, '_') : 'citation'}.txt`);
+      if (res && res.job_id) {
+        localStorage.setItem('vericite_active_job_id', res.job_id);
+        setVerifyPairStatus({ success: `Job queued (${res.job_id}). Transitioning to workspace overview…` });
+        setTimeout(() => {
+          navigate('/workspace/overview');
+        }, 800);
+      }
+    } catch (err) {
+      setVerifyPairStatus({ error: `Verification request failed: ${err.message}` });
+    } finally {
+      setIsVerifyingPair(false);
+    }
   };
 
   return (
@@ -765,29 +799,49 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
                     No candidate citations attached. Use Step 4 to find and attach relevant literature.
                   </p>
                 ) : (
-                  <ul className="attached-citations-list">
-                    {draft.attachedCitations.map((c, i) => (
-                      <li key={c.doi || i} className="attached-citation-item">
-                        <div className="item-text">
-                          <strong>{c.title}</strong>
-                          <span className="item-meta">
-                            {c.year && `(${c.year}) `}
-                            {c.provider && `[${c.provider}] `}
-                            {c.doi && `DOI: ${c.doi}`}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          className="remove-btn"
-                          aria-label={`Remove citation ${c.title}`}
-                          onClick={() => handleRemoveCitation(i)}
-                          title="Remove citation"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    <ul className="attached-citations-list">
+                      {draft.attachedCitations.map((c, i) => (
+                        <li key={c.doi || i} className="attached-citation-item">
+                          <div className="item-text">
+                            <strong>{c.title}</strong>
+                            <span className="item-meta">
+                              {c.year && `(${c.year}) `}
+                              {c.provider && `[${c.provider}] `}
+                              {c.doi && `DOI: ${c.doi}`}
+                            </span>
+                            <div className="verify-action-row" style={{ marginTop: '0.4rem' }}>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-verify-pair"
+                                disabled={isVerifyingPair || !draft.claim.trim()}
+                                onClick={() => handleVerifyAttachedPair(c)}
+                                style={{ fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
+                                title="Run backend verification for this claim–paper pair"
+                              >
+                                <Sparkles size={12} style={{ marginRight: '4px' }} />
+                                Verify this claim against this paper
+                              </button>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="remove-btn"
+                            aria-label={`Remove citation ${c.title}`}
+                            onClick={() => handleRemoveCitation(i)}
+                            title="Remove citation"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    {verifyPairStatus && (
+                      <div className="sim-verify-status-box" style={{ marginTop: '0.75rem', fontSize: '0.82rem', padding: '0.5rem', borderRadius: '4px', background: verifyPairStatus.error ? '#fdf0f1' : '#f1f7e5', color: verifyPairStatus.error ? '#96222b' : '#365b17' }}>
+                        {verifyPairStatus.error || verifyPairStatus.success || verifyPairStatus.info}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

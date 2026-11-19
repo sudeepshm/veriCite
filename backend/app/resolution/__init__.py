@@ -18,6 +18,7 @@ from app.config import (
     CROSSREF_MAILTO,
     MAX_RETRIES,
     OPENALEX_EMAIL,
+    OPENALEX_API_KEY,
     PROVIDER_TIMEOUT,
     SEMANTIC_SCHOLAR_API_KEY,
 )
@@ -110,24 +111,78 @@ async def _crossref_doi_lookup(
     doi: str, client: httpx.AsyncClient
 ) -> tuple[IdentityStatus, str | None, str | None, list[str], int | None, str | None]:
     """Return (status, mismatch_note, title, authors, year, canonical_doi)."""
-    url = f"https://api.crossref.org/works/{doi}"
+    clean_doi = doi.removeprefix("https://doi.org/").strip()
+    url = f"https://api.crossref.org/works/{clean_doi}"
     params: dict = {}
     if CROSSREF_MAILTO:
         params["mailto"] = CROSSREF_MAILTO
-    try:
-        resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
-    except (httpx.TimeoutException, httpx.ConnectError):
+
+    resp = None
+    for attempt in range(2):
+        try:
+            resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("retry-after")
+                delay = min(int(retry_after), 3) if (retry_after and retry_after.isdigit()) else 1.0
+                await asyncio.sleep(delay)
+                continue
+            break
+        except (httpx.TimeoutException, httpx.ConnectError):
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+                continue
+            resp = None
+
+    if resp is None:
+        # Crossref timed out or connection failed; try exact-DOI lookup through OpenAlex before failing
+        oa_status, oa_title, oa_authors, oa_year, oa_doi = await _openalex_exact_doi_lookup(clean_doi, client)
+        if oa_status == IdentityStatus.matched:
+            return IdentityStatus.matched, None, oa_title, oa_authors, oa_year, oa_doi or clean_doi
         return IdentityStatus.lookup_failed, None, None, [], None, None
 
     if resp.status_code == 404:
         return IdentityStatus.unresolved, None, None, [], None, None  # caller tries bibliographic
 
     if resp.status_code != 200:
+        # Transient or server error on Crossref; try exact-DOI lookup through OpenAlex
+        oa_status, oa_title, oa_authors, oa_year, oa_doi = await _openalex_exact_doi_lookup(clean_doi, client)
+        if oa_status == IdentityStatus.matched:
+            return IdentityStatus.matched, None, oa_title, oa_authors, oa_year, oa_doi or clean_doi
         return IdentityStatus.lookup_failed, None, None, [], None, None
 
     data = resp.json().get("message", {})
     title, authors, year, canonical_doi = _parse_crossref_work(data)
     return IdentityStatus.matched, None, title, authors, year, canonical_doi or doi
+
+
+async def _openalex_exact_doi_lookup(
+    doi: str, client: httpx.AsyncClient
+) -> tuple[IdentityStatus, str | None, list[str], int | None, str | None]:
+    clean_doi = doi.removeprefix("https://doi.org/").strip()
+    url = f"https://api.openalex.org/works/doi:{clean_doi}"
+    params: dict = {}
+    if OPENALEX_API_KEY:
+        params["api_key"] = OPENALEX_API_KEY
+    if OPENALEX_EMAIL:
+        params["mailto"] = OPENALEX_EMAIL
+    try:
+        resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            title = data.get("display_name")
+            authors = [
+                a.get("author", {}).get("display_name", "")
+                for a in data.get("authorships", [])
+                if a.get("author", {}).get("display_name")
+            ]
+            year = data.get("publication_year")
+            cand_doi = data.get("doi") or clean_doi
+            return IdentityStatus.matched, title, authors, year, cand_doi
+        if resp.status_code == 404:
+            return IdentityStatus.unresolved, None, [], None, None
+    except Exception:
+        pass
+    return IdentityStatus.lookup_failed, None, [], None, None
 
 
 # ---------------------------------------------------------------------------
@@ -189,13 +244,18 @@ async def _openalex_lookup(
 ) -> tuple[str | None, str | None, bool, str | None]:
     """Return (openalex_id, source_url, is_retracted, retraction_note)."""
     if canonical_doi:
-        url = f"https://api.openalex.org/works/doi:{canonical_doi}"
+        clean_doi = canonical_doi.removeprefix("https://doi.org/").strip()
+        url = f"https://api.openalex.org/works/doi:{clean_doi}"
         params: dict = {}
+        if OPENALEX_API_KEY:
+            params["api_key"] = OPENALEX_API_KEY
         if OPENALEX_EMAIL:
             params["mailto"] = OPENALEX_EMAIL
     elif matched_title:
         url = "https://api.openalex.org/works"
         params = {"search": matched_title, "per-page": 1}
+        if OPENALEX_API_KEY:
+            params["api_key"] = OPENALEX_API_KEY
         if OPENALEX_EMAIL:
             params["mailto"] = OPENALEX_EMAIL
     else:

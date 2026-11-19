@@ -34,6 +34,7 @@ GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 # External provider credentials
 # ---------------------------------------------------------------------------
 
+OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
 CROSSREF_MAILTO: str = os.getenv("CROSSREF_MAILTO", "")
 # OPENALEX_EMAIL falls back to CROSSREF_MAILTO if not set explicitly
 OPENALEX_EMAIL: str = os.getenv("OPENALEX_EMAIL", "") or CROSSREF_MAILTO
@@ -73,6 +74,7 @@ __all__ = [
     "GEMINI_MODEL",
     "CROSSREF_MAILTO",
     "OPENALEX_EMAIL",
+    "OPENALEX_API_KEY",
     "SEMANTIC_SCHOLAR_API_KEY",
     "UNPAYWALL_EMAIL",
     "EMBEDDING_MODEL",

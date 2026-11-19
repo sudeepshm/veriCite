@@ -33,5 +33,19 @@ export function sampleClaims(){
  const evidence=['The review describes higher examination performance under active learning.','The review describes average effects, not an exact 30% improvement for every student.','The review concerns undergraduate science, technology, engineering, and mathematics education.','The review describes higher failure rates under traditional lecturing.','The publication dates to 2014; this demo has not searched for more recent evidence.','No evidence available.'];
  return rows.map((r,i)=>({...r,status:verdicts[i],confidence:i===5?null:['High','High','Medium','High','Low'][i],reason:reasons[i],evidence:evidence[i],section:i===5?'Not available':'Illustrative paraphrase · not a retrieved quotation',flags:i===1?['Numeric overstatement']:i===2?['Population mismatch']:i===3?['Reversed conclusion']:i===4?['Freshness review']:r.flags}));
 }
-export function report(state){return {product:'veriCite',generatedAt:new Date().toISOString(),mode:state.mode,disclaimer:'Demo only. Sample evidence is illustrative; custom inputs are unverified. Human review is required.',document:state.analyzedTitle||state.title,claims:state.claims,reviews:state.reviews,history:state.history};}
+export function report(state) {
+  return {
+    product: 'veriCite',
+    generatedAt: new Date().toISOString(),
+    mode: state.mode,
+    disclaimer: 'Demo only. Sample evidence is illustrative; custom inputs are unverified. Human review is required.',
+    document: state.analyzedTitle || state.title,
+    claims: state.claims,
+    reviews: state.reviews,
+    history: state.history,
+    summary: state.summary || null,
+    stageErrors: state.stageErrors || [],
+    assessmentMethod: state.assessmentMethod || (state.mode?.includes('AI-verified') ? 'Automated verification pipeline' : 'Local extraction fallback')
+  };
+}
 export function csv(rows){const cell=v=>'"'+String(v??'').replaceAll('"','""')+'"';return [['Claim','Verdict','Confidence','References','Evidence','Explanation'],...rows.map(r=>[r.claim,r.status,r.confidence,r.references.join('; '),r.evidence,r.reason])].map(r=>r.map(cell).join(',')).join('\r\n');}

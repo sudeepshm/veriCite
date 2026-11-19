@@ -16,7 +16,14 @@ from typing import Optional
 import httpx
 import numpy as np
 
-from app.config import EMBEDDING_MODEL, MAX_DOWNLOAD_SIZE_MB, PROVIDER_TIMEOUT, SEMANTIC_SCHOLAR_API_KEY
+from app.config import (
+    EMBEDDING_MODEL,
+    MAX_DOWNLOAD_SIZE_MB,
+    OPENALEX_API_KEY,
+    OPENALEX_EMAIL,
+    PROVIDER_TIMEOUT,
+    SEMANTIC_SCHOLAR_API_KEY,
+)
 from app.models import CoverageStatus, DocumentBlock, Passage, ResolvedSource
 
 # ---------------------------------------------------------------------------
@@ -87,14 +94,27 @@ def _chunk_abstract(text: str) -> list[str]:
 async def _fetch_abstract_openalex(
     openalex_id: str | None, canonical_doi: str | None, client: httpx.AsyncClient
 ) -> str | None:
+    params: dict = {}
+    if OPENALEX_API_KEY:
+        params["api_key"] = OPENALEX_API_KEY
+    if OPENALEX_EMAIL:
+        params["mailto"] = OPENALEX_EMAIL
+
     if openalex_id:
-        url = openalex_id  # OpenAlex IDs are URLs like https://openalex.org/W...
+        # Convert public work URL (e.g. https://openalex.org/W...) to API work URL
+        clean_id = openalex_id.strip()
+        if "openalex.org/" in clean_id:
+            work_short = clean_id.split("openalex.org/")[-1].strip("/")
+            url = f"https://api.openalex.org/works/{work_short}"
+        else:
+            url = f"https://api.openalex.org/works/{clean_id}"
     elif canonical_doi:
-        url = f"https://api.openalex.org/works/doi:{canonical_doi}"
+        clean_doi = canonical_doi.removeprefix("https://doi.org/").strip()
+        url = f"https://api.openalex.org/works/doi:{clean_doi}"
     else:
         return None
     try:
-        resp = await client.get(url, timeout=PROVIDER_TIMEOUT)
+        resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
         if resp.status_code == 200:
             data = resp.json()
             # OpenAlex stores abstract as inverted index
