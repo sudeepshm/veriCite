@@ -1,0 +1,11 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {extract,sampleClaims,csv,report} from './engine.js';
+test('maps numeric citations without including reference entries as claims',()=>{const r=extract('An intervention improves results [1].\n\nReferences\n[1] Smith 2020. Study.');assert.equal(r.length,1);assert.equal(r[0].references.length,1);assert.equal(r[0].status,'Unverified');assert.equal(r[0].confidence,null)});
+test('flags missing and unmatched citations',()=>{assert.deepEqual(extract('This assertion has no citation.')[0].flags,['Missing citation']);assert.deepEqual(extract('A finding is supported [7].')[0].flags,['Unmatched reference'])});
+test('maps author-year references',()=>{assert.equal(extract('The results improved (Smith, 2020).\nReferences\nSmith (2020). A study.')[0].references.length,1)});
+test('does not invent DOI URLs or proof',()=>{const r=extract('This intervention is effective [1].\nReferences\n[1] A paper.')[0];assert.equal(r.source,null);assert.equal(r.status,'Unverified')});
+test('sample covers all verdicts',()=>assert.equal(new Set(sampleClaims().map(r=>r.status)).size,6));
+test('CSV escapes commas quotes and newlines',()=>assert.match(csv([{claim:'a,"b"\nc',status:'Unverified',references:[]}]),/"a,""b""\nc"/));
+test('report preserves decisions and demo disclaimer',()=>{const x=report({title:'Test',claims:[],reviews:{},history:[],mode:'Sample demo'});assert.match(x.disclaimer,/Demo only/);assert.equal(x.document,'Test')});
+test('report keeps analyzed document identity while another document is being edited',()=>{const r=report({title:'New draft',analyzedTitle:'Analyzed paper',claims:[],reviews:{},history:[]});assert.equal(r.document,'Analyzed paper')});
