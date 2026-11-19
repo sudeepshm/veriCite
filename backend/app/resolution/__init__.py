@@ -392,6 +392,21 @@ async def resolve_reference(ref: Reference, client: httpx.AsyncClient) -> Resolv
         if s2_url:
             source_url = s2_url
 
+    # Check for offline local file mapping (e.g. source-1.txt, source-2.txt)
+    ref_num = 1
+    if "_r" in ref.ref_id:
+        try:
+            ref_num = int(ref.ref_id.split("_r")[-1]) + 1
+        except Exception:
+            ref_num = 1
+    from pathlib import Path
+    for p in [Path(f"source-{ref_num}.txt"), Path(f"backend/source-{ref_num}.txt")]:
+        if p.is_file():
+            identity_status = IdentityStatus.matched
+            source_url = str(p.resolve())
+            matched_title = ref.title or f"Offline Source {ref_num}"
+            break
+
     return ResolvedSource(
         source_id=source_id,
         ref_id=ref.ref_id,

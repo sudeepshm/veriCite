@@ -97,6 +97,12 @@ def parse_references(blocks: list[DocumentBlock]) -> list[Reference]:
     """Parse bibliography blocks into Reference objects."""
     bib_blocks = [b for b in blocks if b.block_type == BlockType.bibliography]
     if not bib_blocks:
+        bib_blocks = [
+            b for b in blocks
+            if (b.section and any(k in b.section.lower() for k in ("reference", "bibliography")))
+            or re.search(r"^\s*\[\d+\]\s+[A-Z]", b.text, re.MULTILINE)
+        ]
+    if not bib_blocks:
         return []
 
     document_id = bib_blocks[0].document_id
@@ -411,24 +417,16 @@ async def extract_claims_and_links(
             if last_error is not None:
                 issues.append(
                     f"block={block.block_id} marker='{marker_text}': "
-                    f"Gemini extraction failed after {MAX_RETRIES} attempts: {last_error}"
+                    f"Gemini extraction failed: {last_error}. Using deterministic clause fallback."
                 )
-                # Create a fallback link marked ambiguous
-                for rid in allowed_ref_ids:
-                    link_id = f"lnk_{uuid.uuid4().hex[:12]}"
-                    links.append(
-                        ClaimReferenceLink(
-                            link_id=link_id,
-                            claim_id="",  # no claim created
-                            ref_id=rid,
-                            citation_marker=marker_text,
-                            marker_char_start=cs,
-                            marker_char_end=ce,
-                            citation_group_id=f"group_{block.block_id}_{marker_index}",
-                            mapping_status=MappingStatus.ambiguous,
-                        )
-                    )
-                continue
+
+            if not claim_dicts:
+                claim_dicts = [{
+                    "claim_text": clause_text.strip(),
+                    "original_span": clause_text.strip(),
+                    "ref_ids": allowed_ref_ids,
+                    "qualifiers": "",
+                }]
 
             # Determine if the whole marker group is ambiguous
             is_ambiguous_group = (
@@ -472,7 +470,33 @@ async def extract_claims_and_links(
                         )
                     )
 
-    return claims, links, issues
+    # Deduplicate claims with identical normalized text within the document
+    deduped_claims: list[Claim] = []
+    seen_texts: dict[str, str] = {}
+    for c in claims:
+        key = c.normalized_text.strip().lower() or c.original_span.strip().lower()
+        if key not in seen_texts:
+            seen_texts[key] = c.claim_id
+            deduped_claims.append(c)
+
+    # Remap links to deduplicated claim IDs and drop duplicate links
+    deduped_links: list[ClaimReferenceLink] = []
+    seen_links: set[tuple[str, str]] = set()
+    for lk in links:
+        target_claim_id = lk.claim_id
+        matching_claim = next((c for c in claims if c.claim_id == lk.claim_id), None)
+        if matching_claim:
+            key = matching_claim.normalized_text.strip().lower() or matching_claim.original_span.strip().lower()
+            target_claim_id = seen_texts.get(key, lk.claim_id)
+
+        pair_key = (target_claim_id, lk.ref_id)
+        if pair_key not in seen_links:
+            seen_links.add(pair_key)
+            if target_claim_id != lk.claim_id:
+                lk = lk.model_copy(update={"claim_id": target_claim_id})
+            deduped_links.append(lk)
+
+    return deduped_claims, deduped_links, issues
 
 
 __all__ = [

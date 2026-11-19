@@ -90,9 +90,11 @@ def build_report(
     return VerificationReport(
         job_id=job_id,
         document_id=document_id,
-        total_claims=len(unique_claims),
-        total_references=len(unique_refs),
+        total_claims=len(claims) if claims else len(unique_claims),
+        total_references=len(refs) if refs else len(unique_refs),
         total_pairs=len(assessments),
+        claims=claims,
+        references=refs,
         assessments=assessments,
         issues=issues,
         stage_errors=stage_errors,

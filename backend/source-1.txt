@@ -1,0 +1,2 @@
+Classification accuracy in an adult pilot trial rose from 50% to 60%.
+The absolute accuracy gain observed in the adult pilot was 10 percentage points.

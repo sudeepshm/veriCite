@@ -176,6 +176,8 @@ class VerificationReport(BaseModel):
     total_claims: int
     total_references: int
     total_pairs: int
+    claims: list[Claim] = Field(default_factory=list)
+    references: list[Reference] = Field(default_factory=list)
     assessments: list[Assessment] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
     stage_errors: list[str] = Field(default_factory=list)

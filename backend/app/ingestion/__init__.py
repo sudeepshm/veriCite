@@ -367,6 +367,14 @@ def _plain_blocks(content: bytes, document_id: str) -> tuple[list[DocumentBlock]
     except Exception as exc:
         raise ValueError(f"Could not decode text content: {exc}") from exc
 
+    # Normalize: ensure standalone heading lines (e.g. "References\n[1]")
+    # have paragraph breaks so heading detection works reliably.
+    text = re.sub(
+        r"(?im)^((?:#{1,6}\s+.*|(?:references|bibliography|findings|results|discussion|conclusion|conclusions|introduction|methods|abstract)\s*:?))\n(?!\n)",
+        r"\1\n\n",
+        text,
+    )
+
     paragraphs = re.split(r"\n{2,}", text)
 
     blocks: list[DocumentBlock] = []

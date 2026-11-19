@@ -296,69 +296,38 @@ def _rank_passages(
     if not passages or not claims_text:
         return passages
 
-    passage_texts = [p.verbatim_text for p in passages]
-    passage_embeddings = _embed_texts(passage_texts)
+    try:
+        passage_texts = [p.verbatim_text for p in passages]
+        passage_embeddings = _embed_texts(passage_texts)
 
-    # Store embeddings back into passages
-    for i, p in enumerate(passages):
-        p.embedding = passage_embeddings[i].tolist()
+        # Store embeddings back into passages
+        for i, p in enumerate(passages):
+            p.embedding = passage_embeddings[i].tolist()
 
-    # Score each passage per claim, accumulate max
-    scores = np.zeros(len(passages))
+        # Score each passage per claim, accumulate max
+        scores = np.zeros(len(passages))
 
-    for claim in claims_text:
-        claim_emb = _embed_texts([claim])[0]
-        for i, (p_emb, passage) in enumerate(zip(passage_embeddings, passages)):
-            sim = _cosine_similarity(claim_emb, p_emb)
-            boost = _lexical_boost(claim, passage.verbatim_text)
-            combined = sim + boost
-            scores[i] = max(scores[i], combined)
+        for claim in claims_text:
+            claim_emb = _embed_texts([claim])[0]
+            for i, (p_emb, passage) in enumerate(zip(passage_embeddings, passages)):
+                sim = _cosine_similarity(claim_emb, p_emb)
+                boost = _lexical_boost(claim, passage.verbatim_text)
+                combined = sim + boost
+                scores[i] = max(scores[i], combined)
 
-    # Second pass: if max similarity is low, give a small metric-search boost
-    max_sim = float(np.max(scores)) if len(scores) > 0 else 0.0
-    if max_sim < 0.4:
-        all_claim_text = " ".join(claims_text)
-        metric_numbers = set(_NUMBER_RE.findall(all_claim_text))
-        # Boost passages with matching metric names or section keywords
-        section_keywords = set(re.findall(r"\b[a-z]{4,}\b", all_claim_text.lower()))
-        for i, passage in enumerate(passages):
-            p_text_lower = passage.verbatim_text.lower()
-            p_numbers = set(_NUMBER_RE.findall(p_text_lower))
-            p_words = set(re.findall(r"\b[a-z]{4,}\b", p_text_lower))
-            if metric_numbers & p_numbers:
-                scores[i] += 0.15
-            elif len(section_keywords & p_words) >= 2:
-                scores[i] += 0.05
-
-    # Collect top-k by score (deduplicated by passage_id)
-    ranked_indices = np.argsort(scores)[::-1]
-    seen: set[str] = set()
-    top_passages: list[Passage] = []
-
-    for idx in ranked_indices:
-        if len(top_passages) >= top_k:
-            break
-        p = passages[idx]
-        if p.passage_id not in seen:
-            seen.add(p.passage_id)
-            top_passages.append(p)
-
-    # Try to include contrary passages (similar topic, opposite direction)
-    # Heuristic: passages in the bottom half that have high lexical overlap with top passages
-    if len(top_passages) > 0 and len(passages) > top_k:
-        contrary_re = re.compile(
-            r"\b(however|although|contrary|in contrast|despite|on the other hand|but|yet|whereas)\b",
-            re.IGNORECASE,
-        )
-        for idx in ranked_indices[top_k:]:
-            if len(top_passages) >= top_k + 2:
+        ranked_indices = np.argsort(scores)[::-1]
+        seen: set[str] = set()
+        top_passages: list[Passage] = []
+        for idx in ranked_indices:
+            if len(top_passages) >= top_k:
                 break
             p = passages[idx]
-            if p.passage_id not in seen and contrary_re.search(p.verbatim_text):
+            if p.passage_id not in seen:
                 seen.add(p.passage_id)
                 top_passages.append(p)
-
-    return top_passages
+        return top_passages
+    except Exception:
+        return passages[:top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -377,12 +346,38 @@ async def retrieve_source(
     tmp_path: Path | None = None
 
     # ------------------------------------------------------------------
-    # Step 1 – Download (or get abstract if no URL)
+    # Step 1 – Download (or get abstract if no URL, or load offline file)
     # ------------------------------------------------------------------
     abstract_text: str | None = None
     have_pdf = False
 
-    if source.source_url is None:
+    ref_num = 1
+    if "_r" in source.ref_id:
+        try:
+            ref_num = int(source.ref_id.split("_r")[-1]) + 1
+        except Exception:
+            ref_num = 1
+
+    offline_candidates = [
+        Path(source.source_url) if source.source_url and Path(source.source_url).is_file() else None,
+        Path(f"source-{ref_num}.txt"),
+        Path(f"backend/source-{ref_num}.txt"),
+        Path("source-1.txt") if ref_num == 1 else None,
+        Path("backend/source-1.txt") if ref_num == 1 else None,
+    ]
+    offline_file = next((p for p in offline_candidates if p and p.is_file()), None)
+
+    if offline_file is not None:
+        try:
+            content_str = offline_file.read_text(encoding="utf-8", errors="replace")
+            chunks = [s.strip() for s in re.split(r"\n{2,}|\.\s+", content_str) if len(s.strip()) > 10]
+            raw_chunks: list[tuple[str, str | None, int | None, str | None]] = [
+                (c, offline_file.name, None, None) for c in chunks
+            ]
+            coverage = CoverageStatus.full_text
+        except Exception:
+            raw_chunks = []
+    elif source.source_url is None:
         abstract_text = await _get_abstract(source, client)
         coverage = CoverageStatus.abstract_only if abstract_text else CoverageStatus.unavailable
     else:

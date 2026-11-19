@@ -1,4 +1,4 @@
-export const statuses = ['Supported','Partly supported','Unsupported','Contradictory','Possibly outdated','Unverified'];
+export const statuses = ['Supported','Partly supported','Unsupported','Contradictory','Possibly outdated','Unable to assess','Unverified'];
 export const sampleText = `Active learning improves examination performance in undergraduate STEM courses [1].
 Active learning raises every student's score by exactly 30% [1].
 The study proves the same effects in primary-school children [1].
@@ -11,7 +11,15 @@ References
 export function extract(text) {
  const parts=text.split(/^\s*(?:references|bibliography)\s*:?[ \t]*$/im);
  const refs=(parts[1]||'').split('\n').map(x=>x.trim()).filter(Boolean);
- const sentences=parts[0].split(/\n+|(?<=[.!?])\s+(?=[A-Z])/).map(x=>x.trim()).filter(x=>x.length>12);
+ const hasCitations=/\[\d+\]|\(([A-Za-z][A-Za-z -]+),\s*(\d{4})\)/.test(parts[0]);
+ const isHeading=s=>/^(?:#{1,6}\s+|(?:\d+\.?\s+)?(?:abstract|introduction|background|related work|methodology|methods|results|findings|discussion|conclusions?|references|bibliography)\s*:?$)/i.test(s.trim());
+ const rawSentences=parts[0].split(/\n+|(?<=[.!?])\s+(?=[A-Z])/).map(x=>x.trim()).filter(x=>x.length>12);
+ const sentences=rawSentences.filter(s=>{
+  if(isHeading(s))return false;
+  const markers=[...s.matchAll(/\[(\d+)\]|\(([A-Za-z][A-Za-z -]+),\s*(\d{4})\)/g)];
+  if(hasCitations&&!markers.length)return false;
+  return true;
+ });
  return sentences.map((claim,i)=>{
  const markers=[...claim.matchAll(/\[(\d+)\]|\(([A-Za-z][A-Za-z -]+),\s*(\d{4})\)/g)].map(m=>m[1]?`[${m[1]}]`:`(${m[2]}, ${m[3]})`);
  const references=markers.map(m=>refs.find(r=>m.startsWith('[')?r.startsWith(m):r.toLowerCase().includes(m.slice(1).split(',')[0].toLowerCase())&&r.includes(m.match(/\d{4}/)[0]))).filter(Boolean);

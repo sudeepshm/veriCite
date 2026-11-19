@@ -9,3 +9,14 @@ test('sample covers all verdicts',()=>assert.equal(new Set(sampleClaims().map(r=
 test('CSV escapes commas quotes and newlines',()=>assert.match(csv([{claim:'a,"b"\nc',status:'Unverified',references:[]}]),/"a,""b""\nc"/));
 test('report preserves decisions and demo disclaimer',()=>{const x=report({title:'Test',claims:[],reviews:{},history:[],mode:'Sample demo'});assert.match(x.disclaimer,/Demo only/);assert.equal(x.document,'Test')});
 test('report keeps analyzed document identity while another document is being edited',()=>{const r=report({title:'New draft',analyzedTitle:'Analyzed paper',claims:[],reviews:{},history:[]});assert.equal(r.document,'Analyzed paper')});
+test('manuscript alone produces 3 unverified preview cards excluding title, subtitle and headings',()=>{const text=`Classification results across two trials
+Synthetic manuscript for offline testing
+
+Findings
+Accuracy rose from 50% to 60% in the adult pilot [1].
+The absolute accuracy gain was 20 percentage points in the adult pilot [1].
+A second trial reported 90% accuracy [2].
+
+References
+[1] Rao, M. (2025). Classification accuracy in an adult pilot. Fixture Studies, 1, 1.
+[2] Sen, J. (2025). Results from a second trial. Fixture Studies, 2, 1.`;const claims=extract(text);assert.equal(claims.length,3);assert.equal(claims[0].claim,'Accuracy rose from 50% to 60% in the adult pilot [1].');assert.equal(claims[0].status,'Unverified');assert.equal(claims[1].claim,'The absolute accuracy gain was 20 percentage points in the adult pilot [1].');assert.equal(claims[1].status,'Unverified');assert.equal(claims[2].claim,'A second trial reported 90% accuracy [2].');assert.equal(claims[2].status,'Unverified')});
