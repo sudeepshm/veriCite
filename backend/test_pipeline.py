@@ -532,6 +532,96 @@ References
         self.assertNotEqual(assessment.semantic_verdict, SemanticVerdict.SUPPORTED, "Direction reversal must never return SUPPORTED")
         self.assertEqual(assessment.semantic_verdict, SemanticVerdict.CONTRADICTORY, "Decreased vs gain/increased must return CONTRADICTORY")
 
+    async def test_gain_decreased_vs_gain_increased_direction_binding(self):
+        """Case 1: Claim 'Accuracy gain decreased by 10 percentage points' vs Source 'Accuracy gain increased by 10 percentage points'.
+        Must resolve compound predicate direction and return CONTRADICTORY, never SUPPORTED.
+        """
+        claim = Claim(
+            claim_id="clm_comp_dir",
+            document_id="doc_comp_dir",
+            block_id="blk_1",
+            original_span="Accuracy gain decreased by 10 percentage points [1].",
+            normalized_text="Accuracy gain decreased by 10 percentage points.",
+            sentence_index=0,
+            qualifiers="",
+        )
+        source = ResolvedSource(
+            source_id="src_1",
+            ref_id="ref_1",
+            identity_status=IdentityStatus.matched,
+            matched_title="Pilot paper",
+            coverage=CoverageStatus.full_text,
+        )
+        passage = Passage(
+            passage_id="pas_1",
+            source_id="src_1",
+            verbatim_text="Accuracy gain increased by 10 percentage points.",
+            section="Results",
+        )
+        assessment = await assess_claim_reference_pair(claim, source, [passage])
+        self.assertNotEqual(assessment.semantic_verdict, SemanticVerdict.SUPPORTED, "Opposing gain directions must never be SUPPORTED")
+        self.assertEqual(assessment.semantic_verdict, SemanticVerdict.CONTRADICTORY, "Opposing gain directions must be CONTRADICTORY")
+
+    async def test_time_window_mismatch_same_direction_abstains(self):
+        """Case 2: Claim 'Accuracy increased by 10 points at week 1' vs Source 'Accuracy increased by 10 points at week 12'.
+        Differing time windows must abstain (unable_to_assess), never SUPPORTED.
+        """
+        claim = Claim(
+            claim_id="clm_tw_1",
+            document_id="doc_tw_1",
+            block_id="blk_1",
+            original_span="Accuracy increased by 10 points at week 1 [1].",
+            normalized_text="Accuracy increased by 10 points at week 1.",
+            sentence_index=0,
+            qualifiers="",
+        )
+        source = ResolvedSource(
+            source_id="src_1",
+            ref_id="ref_1",
+            identity_status=IdentityStatus.matched,
+            matched_title="Pilot paper",
+            coverage=CoverageStatus.full_text,
+        )
+        passage = Passage(
+            passage_id="pas_1",
+            source_id="src_1",
+            verbatim_text="Accuracy increased by 10 points at week 12.",
+            section="Results",
+        )
+        assessment = await assess_claim_reference_pair(claim, source, [passage])
+        self.assertEqual(assessment.assessment_status, AssessmentStatus.unable_to_assess, "Differing time windows must abstain")
+        self.assertIsNone(assessment.semantic_verdict, "Must not return SUPPORTED or CONTRADICTORY for mismatched time windows")
+
+    async def test_time_window_mismatch_different_direction_abstains(self):
+        """Case 3: Claim 'Accuracy decreased by 10 points at week 1' vs Source 'Accuracy increased by 10 points at week 12'.
+        Because time windows differ, the observations do not cover the same period; must abstain (unable_to_assess), never CONTRADICTORY or SUPPORTED.
+        """
+        claim = Claim(
+            claim_id="clm_tw_2",
+            document_id="doc_tw_2",
+            block_id="blk_1",
+            original_span="Accuracy decreased by 10 points at week 1 [1].",
+            normalized_text="Accuracy decreased by 10 points at week 1.",
+            sentence_index=0,
+            qualifiers="",
+        )
+        source = ResolvedSource(
+            source_id="src_1",
+            ref_id="ref_1",
+            identity_status=IdentityStatus.matched,
+            matched_title="Pilot paper",
+            coverage=CoverageStatus.full_text,
+        )
+        passage = Passage(
+            passage_id="pas_1",
+            source_id="src_1",
+            verbatim_text="Accuracy increased by 10 points at week 12.",
+            section="Results",
+        )
+        assessment = await assess_claim_reference_pair(claim, source, [passage])
+        self.assertEqual(assessment.assessment_status, AssessmentStatus.unable_to_assess, "Differing time windows must abstain")
+        self.assertIsNone(assessment.semantic_verdict, "Must not issue CONTRADICTORY when observations cover different time periods")
+
     async def test_ambiguous_source_identity_halts_automatic_assessment(self):
         """Ambiguous source identity must route to unable_to_assess and halt automatic support."""
         claim = Claim(
