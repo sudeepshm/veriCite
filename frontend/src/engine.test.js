@@ -20,3 +20,25 @@ A second trial reported 90% accuracy [2].
 References
 [1] Rao, M. (2025). Classification accuracy in an adult pilot. Fixture Studies, 1, 1.
 [2] Sen, J. (2025). Results from a second trial. Fixture Studies, 2, 1.`;const claims=extract(text);assert.equal(claims.length,3);assert.equal(claims[0].claim,'Accuracy rose from 50% to 60% in the adult pilot [1].');assert.equal(claims[0].status,'Unverified');assert.equal(claims[1].claim,'The absolute accuracy gain was 20 percentage points in the adult pilot [1].');assert.equal(claims[1].status,'Unverified');assert.equal(claims[2].claim,'A second trial reported 90% accuracy [2].');assert.equal(claims[2].status,'Unverified')});
+test('manuscript.txt asserts 3 unique claims, 2 references, and 3 claim-reference pairs in report and UI',()=>{const text=`Classification results across two trials
+Synthetic manuscript for offline testing
+
+Findings
+Accuracy rose from 50% to 60% in the adult pilot [1].
+The absolute accuracy gain was 20 percentage points in the adult pilot [1].
+A second trial reported 90% accuracy [2].
+
+References
+[1] Rao, M. (2025). Classification accuracy in an adult pilot. Fixture Studies, 1, 1.
+[2] Sen, J. (2025). Results from a second trial. Fixture Studies, 2, 1.`;
+const uiCards=extract(text);
+assert.equal(uiCards.length,3,'UI preview must show 3 claim cards');
+const uniqueClaimTexts=new Set(uiCards.map(c=>c.claim));
+assert.equal(uniqueClaimTexts.size,3,'Must have 3 unique claims');
+const allDistinctRefs=new Set(uiCards.flatMap(c=>c.references));
+assert.equal(allDistinctRefs.size,2,'Must reference 2 distinct publications');
+const claimRefPairs=uiCards.flatMap(c=>c.references.map(r=>({claim:c.claim,ref:r})));
+assert.equal(claimRefPairs.length,3,'Must have exactly 3 claim-reference pairs');
+const rpt=report({title:'manuscript.txt',claims:uiCards,reviews:{},history:[],mode:'AI-verified document'});
+assert.equal(rpt.claims.length,3,'Final report must contain 3 claims');
+});

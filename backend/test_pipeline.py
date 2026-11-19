@@ -429,6 +429,81 @@ References
         self.assertTrue(any("rose from 50% to 60%" in pt for pt in p_texts))
         self.assertTrue(any("10 percentage points" in pt for pt in p_texts))
 
+    async def test_regression_neighboring_sentence_extraction_rejected(self):
+        """Two adjacent sentences both cite [1]. A mocked Gemini response that tries
+        to return a neighboring sentence must be rejected, preserving the target sentence.
+        """
+        text = """Trial Report
+Findings
+Accuracy rose from 50% to 60% in the adult pilot [1]. The absolute accuracy gain was 20 percentage points in the adult pilot [1].
+
+References
+[1] Rao, M. (2025). Accuracy in an adult pilot. Fixture Studies, 1, 1.
+"""
+        doc_id, blocks, _ = await ingest_document(text.encode("utf-8"), "adjacent.txt", "text/plain")
+        refs = parse_references(blocks)
+        self.assertEqual(len(refs), 1)
+
+        # Mock extract_claims_gemini:
+        # When called for sentence 1, try to return sentence 2's span (neighboring sentence extraction)
+        async def mock_gemini_neighbor(paragraph_text, marked_span, allowed_ref_ids, original_span, target_sentence=None, surrounding_context=None):
+            target = target_sentence or original_span
+            if "rose from 50% to 60%" in target:
+                # Malicious / faulty return: returns neighbor sentence 2
+                return [{
+                    "claim_text": "The absolute accuracy gain was 20 percentage points in the adult pilot",
+                    "original_span": "The absolute accuracy gain was 20 percentage points in the adult pilot [1].",
+                    "ref_ids": allowed_ref_ids,
+                    "qualifiers": "",
+                }]
+            else:
+                return [{
+                    "claim_text": "The absolute accuracy gain was 20 percentage points in the adult pilot",
+                    "original_span": "The absolute accuracy gain was 20 percentage points in the adult pilot [1].",
+                    "ref_ids": allowed_ref_ids,
+                    "qualifiers": "",
+                }]
+
+        with patch("app.extraction.GEMINI_API_KEY", "mock_key"), patch("app.extraction.extract_claims_gemini", side_effect=mock_gemini_neighbor):
+            claims, links, issues = await extract_claims_and_links(blocks, refs)
+
+        # The neighboring sentence extraction must be rejected!
+        # Sentence 1 must NOT have sentence 2's text; it must fall back to its own sentence text.
+        self.assertEqual(len(claims), 2, "Must extract exactly 2 unique claims for the 2 sentences")
+        c1 = claims[0]
+        c2 = claims[1]
+        self.assertIn("rose from 50% to 60%", c1.original_span, "Sentence 1 must retain its own claim, rejecting neighbor")
+        self.assertIn("20 percentage points", c2.original_span, "Sentence 2 must retain its own claim")
+        self.assertEqual(len(links), 2, "Both claims must link to [1]")
+        for lk in links:
+            self.assertEqual(lk.ref_id, refs[0].ref_id)
+            self.assertEqual(lk.citation_marker, "[1]")
+
+    async def test_manuscript_txt_exact_counts_claims_references_pairs(self):
+        """Assert exactly 3 unique claims, 2 references, and 3 claim-reference pairs in pipeline and report."""
+        job = create_job("manuscript.txt", "text/plain")
+        await run_pipeline(
+            job.job_id,
+            FIXTURE_MANUSCRIPT.encode("utf-8"),
+            "manuscript.txt",
+            "text/plain",
+            test_resolver={"[1]": "source-1.txt", "1": "source-1.txt"},
+        )
+        completed_job = get_job(job.job_id)
+        report = completed_job.report
+
+        self.assertEqual(report["total_claims"], 3, "Report must have exactly 3 total claims")
+        self.assertEqual(report["total_references"], 2, "Report must have exactly 2 total references")
+        self.assertEqual(report["total_pairs"], 3, "Report must have exactly 3 total pairs")
+        self.assertEqual(len(report["claims"]), 3, "Report claims list length must be 3")
+        self.assertEqual(len(report["references"]), 2, "Report references list length must be 2")
+        self.assertEqual(len(report["links"]), 3, "Report links list length must be 3")
+        self.assertEqual(len(report["assessments"]), 3, "Report assessments list length must be 3")
+
+        # Verify claim identities are unique
+        claim_texts = [c["original_span"] for c in report["claims"]]
+        self.assertEqual(len(set(claim_texts)), 3, "All 3 claims must be unique")
+
 
 if __name__ == "__main__":
     unittest.main()

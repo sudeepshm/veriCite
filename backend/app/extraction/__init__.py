@@ -9,6 +9,7 @@ extract_claims_and_links(blocks, refs)     -> (claims, links, issues)
 from __future__ import annotations
 
 import asyncio
+import collections
 import re
 import uuid
 import logging
@@ -340,6 +341,48 @@ def _resolve_latex_keys(keys: list[str], refs: list[Reference]) -> list[str]:
     return matched
 
 
+def _split_sentences_with_spans(text: str) -> list[tuple[str, int, int]]:
+    """Split text into sentence spans while tracking character offsets."""
+    boundary_re = re.compile(r"(?<=[.!?])\s+|\n+")
+    splits = [0]
+    for m in boundary_re.finditer(text):
+        splits.append(m.start())
+        splits.append(m.end())
+    splits.append(len(text))
+
+    spans: list[tuple[str, int, int]] = []
+    for i in range(0, len(splits) - 1, 2):
+        s_start = splits[i]
+        s_end = splits[i + 1]
+        sent = text[s_start:s_end]
+        if sent.strip():
+            lead_ws = len(sent) - len(sent.lstrip())
+            trail_ws = len(sent) - len(sent.rstrip())
+            actual_start = s_start + lead_ws
+            actual_end = s_end - trail_ws
+            spans.append((text[actual_start:actual_end], actual_start, actual_end))
+    return spans
+
+
+def _span_belongs_to_sentence(span: str, sentence: str) -> bool:
+    """Validate that *span* belongs to *sentence* (exact or normalized substring)."""
+    s_clean = span.strip()
+    t_clean = sentence.strip()
+    if not s_clean or not t_clean:
+        return False
+    if s_clean in t_clean:
+        return True
+    s_norm = " ".join(s_clean.split()).lower()
+    t_norm = " ".join(t_clean.split()).lower()
+    if s_norm in t_norm:
+        return True
+    s_no_cite = re.sub(r"\[\d+\]|\([^)]+\)", "", s_clean).strip().lower()
+    t_no_cite = re.sub(r"\[\d+\]|\([^)]+\)", "", t_clean).strip().lower()
+    if s_no_cite and s_no_cite in t_no_cite:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Function 3: extract_claims_and_links
 # ---------------------------------------------------------------------------
@@ -364,57 +407,60 @@ async def extract_claims_and_links(
         if not markers:
             continue
 
-        # Process each marker individually
-        for marker_index, (marker_text, cs, ce, marker_ref_ids) in enumerate(markers):
-            # Find the clause containing this marker
-            clause_text = _get_sentence_containing(block.text, cs)
+        sentence_spans = _split_sentences_with_spans(block.text)
+        if not sentence_spans:
+            sentence_spans = [(block.text.strip(), 0, len(block.text))]
 
-            # Unmatched marker: preserve the claim and original marker, record unmatched occurrence,
-            # and create zero verification pairs for it (a neighboring sentence must never supply its ref).
-            if not marker_ref_ids:
-                issues.append(
-                    f"block={block.block_id}: unmatched citation marker '{marker_text}'"
-                )
-                short_uuid = uuid.uuid4().hex[:8]
-                claim_id = f"{block.document_id}_c{short_uuid}"
-                claims.append(
-                    Claim(
-                        claim_id=claim_id,
-                        document_id=block.document_id,
-                        block_id=block.block_id,
-                        original_span=clause_text.strip(),
-                        normalized_text=clause_text.strip(),
-                        char_start=None,
-                        char_end=None,
-                    )
-                )
-                links.append(
-                    ClaimReferenceLink(
-                        link_id=f"lnk_{uuid.uuid4().hex[:12]}",
-                        claim_id=claim_id,
-                        ref_id="",
-                        citation_marker=marker_text,
-                        marker_char_start=cs,
-                        marker_char_end=ce,
-                        citation_group_id=None,
-                        mapping_status=MappingStatus.unmatched,
-                    )
-                )
+        # Assign markers to the sentence span they reside in
+        assigned_markers: dict[int, list[tuple[str, int, int, list[str]]]] = collections.defaultdict(list)
+        for m in markers:
+            m_text, cs, ce, m_rids = m
+            matched_span = False
+            for s_idx, (s_txt, s_st, s_en) in enumerate(sentence_spans):
+                if s_st <= cs <= s_en or s_st <= ce <= s_en or (cs <= s_st and ce >= s_en):
+                    assigned_markers[s_idx].append(m)
+                    matched_span = True
+                    break
+            if not matched_span:
+                for s_idx, (s_txt, s_st, s_en) in enumerate(sentence_spans):
+                    if s_st <= cs:
+                        matched_span = True
+                        assigned_markers[s_idx].append(m)
+                        break
+                if not matched_span:
+                    assigned_markers[0].append(m)
+
+        for sent_idx, (sent_text, sent_start, sent_end) in enumerate(sentence_spans):
+            sent_markers = assigned_markers.get(sent_idx)
+            if not sent_markers:
                 continue
 
-            allowed_ref_ids = list(marker_ref_ids)
+            target_sentence = sent_text.strip()
+            surrounding_context = (block.text[:sent_start] + " " + block.text[sent_end:]).strip()
 
-            # Call Gemini with retries if API key configured
+            unmatched_markers = [m for m in sent_markers if not m[3]]
+            matched_markers = [m for m in sent_markers if m[3]]
+
+            sentence_allowed_ref_ids: list[str] = []
+            for m_text, cs, ce, rids in matched_markers:
+                for rid in rids:
+                    if rid not in sentence_allowed_ref_ids:
+                        sentence_allowed_ref_ids.append(rid)
+
+            combined_markers_str = ", ".join(m[0] for m in sent_markers)
+
             claim_dicts: list[dict] = []
             last_error: str | None = None
-            if GEMINI_API_KEY:
+            if GEMINI_API_KEY and sentence_allowed_ref_ids:
                 for attempt in range(MAX_RETRIES):
                     try:
                         claim_dicts = await extract_claims_gemini(
                             paragraph_text=block.text,
-                            marked_span=marker_text,
-                            allowed_ref_ids=allowed_ref_ids,
-                            original_span=clause_text,
+                            marked_span=combined_markers_str,
+                            allowed_ref_ids=sentence_allowed_ref_ids,
+                            original_span=target_sentence,
+                            target_sentence=target_sentence,
+                            surrounding_context=surrounding_context,
                         )
                         last_error = None
                         break
@@ -430,57 +476,94 @@ async def extract_claims_and_links(
 
                 if last_error is not None:
                     issues.append(
-                        f"block={block.block_id} marker='{marker_text}': "
+                        f"block={block.block_id} markers='{combined_markers_str}': "
                         f"Gemini extraction failed: {last_error}. Using deterministic clause fallback."
                     )
 
-            if not claim_dicts:
-                claim_dicts = [{
-                    "claim_text": clause_text.strip(),
-                    "original_span": clause_text.strip(),
-                    "ref_ids": allowed_ref_ids,
+            # Validate that each returned original_span belongs to the target sentence
+            valid_claim_dicts: list[dict] = []
+            for item in claim_dicts:
+                orig_span = item.get("original_span", "")
+                if _span_belongs_to_sentence(orig_span, target_sentence):
+                    valid_claim_dicts.append(item)
+                else:
+                    logger.warning(
+                        "Rejected claim extraction because original_span %r does not belong to target sentence %r",
+                        orig_span,
+                        target_sentence,
+                    )
+
+            # If no valid claim returned by Gemini, use deterministic target sentence fallback
+            if not valid_claim_dicts:
+                valid_claim_dicts = [{
+                    "claim_text": target_sentence,
+                    "original_span": target_sentence,
+                    "ref_ids": sentence_allowed_ref_ids,
                     "qualifiers": "",
                 }]
 
-            # Determine if the marker group is ambiguous (multiple refs for one marker)
-            is_ambiguous_group = len(marker_ref_ids) > 1
-
-            for claim_dict in claim_dicts:
-                # Build Claim
+            for claim_dict in valid_claim_dicts:
                 short_uuid = uuid.uuid4().hex[:8]
                 claim_id = f"{block.document_id}_c{short_uuid}"
                 claim = Claim(
                     claim_id=claim_id,
                     document_id=block.document_id,
                     block_id=block.block_id,
-                    original_span=claim_dict.get("original_span", clause_text),
-                    normalized_text=claim_dict.get("claim_text", ""),
+                    original_span=claim_dict.get("original_span", target_sentence).strip(),
+                    normalized_text=claim_dict.get("claim_text", target_sentence).strip(),
                     char_start=None,
                     char_end=None,
                 )
                 claims.append(claim)
 
-                # Build ClaimReferenceLinks
-                ref_ids_for_claim: list[str] = claim_dict.get("ref_ids", []) or allowed_ref_ids
-                group_id = (
-                    f"group_{block.block_id}_{marker_index}"
-                    if is_ambiguous_group
-                    else None
-                )
-                for rid in ref_ids_for_claim:
-                    link_id = f"lnk_{uuid.uuid4().hex[:12]}"
+                # Attach unmatched markers from the sentence
+                for m_text, cs, ce, _ in unmatched_markers:
+                    issues.append(
+                        f"block={block.block_id}: unmatched citation marker '{m_text}'"
+                    )
                     links.append(
                         ClaimReferenceLink(
-                            link_id=link_id,
+                            link_id=f"lnk_{uuid.uuid4().hex[:12]}",
                             claim_id=claim_id,
-                            ref_id=rid,
-                            citation_marker=marker_text,
+                            ref_id="",
+                            citation_marker=m_text,
                             marker_char_start=cs,
                             marker_char_end=ce,
-                            citation_group_id=group_id,
-                            mapping_status=MappingStatus.ambiguous if is_ambiguous_group else MappingStatus.mapped,
+                            citation_group_id=None,
+                            mapping_status=MappingStatus.unmatched,
                         )
                     )
+
+                # Attach matched markers from the sentence
+                claim_rids = [
+                    r for r in claim_dict.get("ref_ids", [])
+                    if r in sentence_allowed_ref_ids
+                ]
+
+                for marker_idx, (m_text, cs, ce, m_rids) in enumerate(matched_markers):
+                    is_ambiguous_group = len(m_rids) > 1
+                    group_id = (
+                        f"group_{block.block_id}_{sent_idx}_{marker_idx}"
+                        if is_ambiguous_group
+                        else None
+                    )
+                    target_rids = [r for r in m_rids if (not claim_rids or r in claim_rids)]
+                    if not target_rids and not claim_rids:
+                        target_rids = m_rids
+
+                    for rid in target_rids:
+                        links.append(
+                            ClaimReferenceLink(
+                                link_id=f"lnk_{uuid.uuid4().hex[:12]}",
+                                claim_id=claim_id,
+                                ref_id=rid,
+                                citation_marker=m_text,
+                                marker_char_start=cs,
+                                marker_char_end=ce,
+                                citation_group_id=group_id,
+                                mapping_status=MappingStatus.ambiguous if is_ambiguous_group else MappingStatus.mapped,
+                            )
+                        )
 
     # Deduplicate claims with identical normalized text within the document
     deduped_claims: list[Claim] = []

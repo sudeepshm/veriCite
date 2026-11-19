@@ -33,36 +33,41 @@ async def extract_claims_gemini(
     marked_span: str,
     allowed_ref_ids: list[str],
     original_span: str,
+    target_sentence: str | None = None,
+    surrounding_context: str | None = None,
 ) -> list[dict]:
-    """Call Gemini to extract atomic claims from *paragraph_text*.
+    """Call Gemini to extract atomic claims from *target_sentence* with surrounding context.
 
     Returns a list of dicts, each with keys:
         claim_text, original_span, ref_ids, qualifiers
 
-    Any item whose ref_ids contain values not in *allowed_ref_ids* is filtered
-    out.  Returns [] on empty or parse-failure.  Raises RuntimeError on API
-    error.
+    Any item whose ref_ids contain values not in *allowed_ref_ids*, or whose
+    original_span does not belong to the target sentence, is filtered out.
+    Returns [] on empty or parse-failure. Raises RuntimeError on API error.
     """
     allowed_set = set(allowed_ref_ids)
+    target = (target_sentence or original_span).strip()
+    context = (surrounding_context or paragraph_text).strip()
 
     prompt = (
-        "You are a scientific claim extractor. Given a paragraph from a manuscript "
-        "and a marked citation span, extract all ATOMIC claims being made that are "
-        "linked to the citations. Each atomic claim must be a single verifiable "
-        "assertion with its qualifiers, units, comparators, population, and time point "
-        "preserved. Do not merge multiple assertions into one claim.\n\n"
+        "You are a scientific claim extractor. Given a target sentence from a manuscript "
+        "and its surrounding context, extract all ATOMIC claims being made within the TARGET SENTENCE "
+        "that are linked to the citations. The surrounding context is for background reference only; "
+        "DO NOT extract claims from the surrounding context.\n\n"
+        "Each atomic claim must be a single verifiable assertion with its qualifiers, units, comparators, "
+        "population, and time point preserved. Do not merge multiple assertions into one claim.\n\n"
         "Return a JSON array. Each element: "
         '{"claim_text": str, "original_span": str, "ref_ids": [str], "qualifiers": str}\n'
         "- claim_text: normalized atomic assertion\n"
-        "- original_span: exact substring of the paragraph that contains this claim\n"
+        "- original_span: exact substring of the target sentence that contains this claim\n"
         "- ref_ids: subset of the allowed_ref_ids that this claim specifically applies "
         "to (may be all of them if ambiguous)\n"
         "- qualifiers: any important qualifiers (population, time, units, negation)\n\n"
-        "If no verifiable claims are found, return [].\n"
+        "If no verifiable claims are found in the target sentence, return [].\n"
         f"Important: ref_ids must only contain values from: {allowed_ref_ids}\n\n"
-        f"Paragraph:\n{paragraph_text}\n\n"
-        f"Marked citation span: {marked_span}\n"
-        f"Representative clause: {original_span}"
+        f"Target sentence (extract claims ONLY from this sentence):\n{target}\n\n"
+        f"Surrounding text (context only):\n{context}\n\n"
+        f"Marked citation span: {marked_span}"
     )
 
     try:
@@ -84,9 +89,22 @@ async def extract_claims_gemini(
         logger.warning("extract_claims_gemini: JSON parse failure; raw=%r", raw[:200])
         return []
 
-    # Validate: drop any ref_ids outside allowed_ref_ids (keep item, prune ids)
+    # Validate: drop items whose original_span does not belong to target sentence,
+    # and drop any ref_ids outside allowed_ref_ids
     validated: list[dict] = []
+    target_clean = target.lower()
+    target_no_cite = re.sub(r"\[\d+\]|\([^)]+\)", "", target_clean).strip()
+
     for item in items:
+        orig = item.get("original_span", "").strip()
+        orig_clean = orig.lower()
+        orig_no_cite = re.sub(r"\[\d+\]|\([^)]+\)", "", orig_clean).strip()
+
+        # Validate original_span belongs to target sentence
+        if orig and not (orig_clean in target_clean or (orig_no_cite and orig_no_cite in target_no_cite)):
+            logger.info("Dropping claim because original_span %r is outside target sentence %r", orig, target)
+            continue
+
         ref_ids = item.get("ref_ids", [])
         if isinstance(ref_ids, list):
             item["ref_ids"] = [r for r in ref_ids if r in allowed_set]
