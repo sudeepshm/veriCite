@@ -22,8 +22,7 @@ from app.models import (
     MappingStatus,
     Reference,
 )
-from app.providers import extract_claims_gemini
-from app.config import MAX_RETRIES, GEMINI_API_KEY
+from app.config import MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 
@@ -449,58 +448,13 @@ async def extract_claims_and_links(
 
             combined_markers_str = ", ".join(m[0] for m in sent_markers)
 
-            claim_dicts: list[dict] = []
-            last_error: str | None = None
-            if GEMINI_API_KEY and sentence_allowed_ref_ids:
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        claim_dicts = await extract_claims_gemini(
-                            paragraph_text=block.text,
-                            marked_span=combined_markers_str,
-                            allowed_ref_ids=sentence_allowed_ref_ids,
-                            original_span=target_sentence,
-                            target_sentence=target_sentence,
-                            surrounding_context=surrounding_context,
-                        )
-                        last_error = None
-                        break
-                    except RuntimeError as exc:
-                        last_error = str(exc)
-                        logger.warning(
-                            "extract_claims_gemini attempt %d/%d failed: %s",
-                            attempt + 1,
-                            MAX_RETRIES,
-                            last_error,
-                        )
-                        await asyncio.sleep(2 ** attempt)  # exponential back-off
-
-                if last_error is not None:
-                    issues.append(
-                        f"block={block.block_id} markers='{combined_markers_str}': "
-                        f"Gemini extraction failed: {last_error}. Using deterministic clause fallback."
-                    )
-
-            # Validate that each returned original_span belongs to the target sentence
-            valid_claim_dicts: list[dict] = []
-            for item in claim_dicts:
-                orig_span = item.get("original_span", "")
-                if _span_belongs_to_sentence(orig_span, target_sentence):
-                    valid_claim_dicts.append(item)
-                else:
-                    logger.warning(
-                        "Rejected claim extraction because original_span %r does not belong to target sentence %r",
-                        orig_span,
-                        target_sentence,
-                    )
-
-            # If no valid claim returned by Gemini, use deterministic target sentence fallback
-            if not valid_claim_dicts:
-                valid_claim_dicts = [{
-                    "claim_text": target_sentence,
-                    "original_span": target_sentence,
-                    "ref_ids": sentence_allowed_ref_ids,
-                    "qualifiers": "",
-                }]
+            # Local extraction: extract atomic claims from target sentence using local deterministic rules
+            valid_claim_dicts: list[dict] = [{
+                "claim_text": target_sentence,
+                "original_span": target_sentence,
+                "ref_ids": sentence_allowed_ref_ids,
+                "qualifiers": "",
+            }]
 
             for claim_dict in valid_claim_dicts:
                 short_uuid = uuid.uuid4().hex[:8]

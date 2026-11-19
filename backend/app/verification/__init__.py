@@ -15,8 +15,6 @@ from app.models import (
     ResolvedSource,
     SemanticVerdict,
 )
-from app.providers import classify_claim_gemini
-from app.config import GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -194,55 +192,8 @@ async def assess_claim_reference_pair(
 
     valid_source_passage_ids = {p.passage_id for p in passages}
 
-    # Call Gemini classifier if API key is provided
-    if GEMINI_API_KEY:
-        try:
-            res = await classify_claim_gemini(
-                claim_text=claim.normalized_text,
-                passages=passage_dicts,
-                coverage=coverage_str,
-                source_title=source_title,
-            )
-            raw_verdict = res.get("verdict")
-            verdict = None
-            if raw_verdict:
-                try:
-                    verdict = SemanticVerdict(raw_verdict.upper())
-                except (ValueError, KeyError):
-                    pass
-
-            flags = list(set(issue_flags + res.get("issue_flags", [])))
-            # Require at least one validated passage belonging to this designated source
-            raw_passage_ids = res.get("evidence_passage_ids", [])
-            passage_ids = [pid for pid in raw_passage_ids if pid in valid_source_passage_ids]
-            explanation = res.get("explanation", "Verification completed.")
-
-            confidence = 0.85 if source.coverage == CoverageStatus.full_text else 0.65
-            if not verdict or not passage_ids:
-                status = AssessmentStatus.unable_to_assess
-                verdict = None
-                passage_ids = []
-            else:
-                status = AssessmentStatus.assessed
-
-            return Assessment(
-                assessment_id=assessment_id,
-                claim_id=claim.claim_id,
-                ref_id=source.ref_id,
-                assessment_status=status,
-                semantic_verdict=verdict,
-                evidence_passage_ids=passage_ids,
-                explanation=explanation,
-                issue_flags=flags,
-                human_review_status=HumanReviewStatus.pending,
-                confidence_score=confidence if status == AssessmentStatus.assessed else None,
-                confidence_basis=f"Assessed via Gemini against {len(passages)} passages ({coverage_str}).",
-            )
-        except Exception as exc:
-            logger.warning("Classification failed with error: %s", exc)
-
-    # Fallback: strict numerical rule when Gemini is unavailable.
-    # Only decide a verdict when metric, unit, population, and comparator match.
+    # Crossref-only local verification: strict deterministic logic (no external LLMs).
+    # Only decide a verdict when metric, unit, population, comparator, time point, and direction match.
     c_lower = claim.normalized_text.lower()
     populations = ["adult pilot", "second trial", "pediatric pilot", "pilot study", "clinical trial"]
     claim_pop = next((p for p in populations if p in c_lower), None)

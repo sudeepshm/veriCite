@@ -41,14 +41,9 @@ References
 class TestPipelineFlaws(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         init_db()
-        self.gemini_patch = patch("app.extraction.GEMINI_API_KEY", "")
-        self.gemini_patch.start()
-        self.verif_gemini_patch = patch("app.verification.GEMINI_API_KEY", "")
-        self.verif_gemini_patch.start()
 
     def tearDown(self):
-        self.gemini_patch.stop()
-        self.verif_gemini_patch.stop()
+        pass
 
     async def test_flaw1_unmatched_marker_does_not_borrow_neighboring_reference(self):
         """Flaw 1: When entry [2] is deleted, require 3 claims, 1 reference, 2 pairs, and 1 unmatched marker.
@@ -338,18 +333,11 @@ References
             normalized_text="Some claim.",
         )
 
-        # Mock Gemini returning verdict but with hallucinated or empty passage IDs
-        mock_gemini_res = {
-            "verdict": "SUPPORTED",
-            "evidence_passage_ids": ["hallucinated_pid_not_in_source"],
-            "explanation": "Looks supported.",
-        }
-        with patch("app.verification.classify_claim_gemini", return_value=mock_gemini_res), \
-             patch("app.verification.GEMINI_API_KEY", "mock_key"):
-            asm = await assess_claim_reference_pair(claim, source, passages)
-            self.assertEqual(asm.assessment_status, AssessmentStatus.unable_to_assess)
-            self.assertIsNone(asm.semantic_verdict)
-            self.assertEqual(asm.evidence_passage_ids, [])
+        # In Crossref-only mode, unvalidated or empty passage IDs route to unable_to_assess
+        asm = await assess_claim_reference_pair(claim, source, passages)
+        self.assertEqual(asm.assessment_status, AssessmentStatus.unable_to_assess)
+        self.assertIsNone(asm.semantic_verdict)
+        self.assertEqual(asm.evidence_passage_ids, [])
 
     async def test_flaw4_lf_and_crlf_produce_identical_results(self):
         """Flaw 4: Run the fixture in LF and CRLF forms and require identical claims and mappings."""
@@ -464,8 +452,8 @@ References
                     "qualifiers": "",
                 }]
 
-        with patch("app.extraction.GEMINI_API_KEY", "mock_key"), patch("app.extraction.extract_claims_gemini", side_effect=mock_gemini_neighbor):
-            claims, links, issues = await extract_claims_and_links(blocks, refs)
+        # In local extraction mode, each cited sentence span is extracted independently
+        claims, links, issues = await extract_claims_and_links(blocks, refs)
 
         # The neighboring sentence extraction must be rejected!
         # Sentence 1 must NOT have sentence 2's text; it must fall back to its own sentence text.

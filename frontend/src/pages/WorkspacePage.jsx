@@ -334,9 +334,9 @@ export function WorkspacePage({ state, setState, backendOnline }) {
           // Determine accurate verification mode label
           let modeLabel = 'Custom document · unverified';
           if (assessedCount > 0) {
-            modeLabel = 'AI-verified document';
+            modeLabel = 'Evidence checked';
           } else if (abstainedCount > 0 || failedCount > 0) {
-            modeLabel = 'Partially verified (inconclusive evidence)';
+            modeLabel = 'Crossref metadata matched (inconclusive evidence)';
           }
 
           setThread([]);
@@ -352,7 +352,7 @@ export function WorkspacePage({ state, setState, backendOnline }) {
               failedCount
             },
             stageErrors: rpt.stage_errors || [],
-            assessmentMethod: rpt.sources?.some(s => s.coverage === 'full_text') ? 'Full-text retrieval & semantic verification' : 'Abstract retrieval & rule-based verification',
+            assessmentMethod: rpt.sources?.some(s => s.coverage === 'full_text') ? 'Crossref content link retrieval & deterministic comparator verification' : 'Crossref metadata & abstract inspection',
             reviews: {},
             history: []
           });
@@ -667,8 +667,8 @@ export function WorkspacePage({ state, setState, backendOnline }) {
                 <span>
                   <strong>{state.mode}.</strong>{' '}
                   {backendOnline
-                    ? 'Connected to AI verification backend.' + (stage ? ' Stage ' + stage + '/5: verifying…' : '')
-                    : 'No live AI or source retrieval. Sample evidence is illustrative; custom claims remain unverified.'}
+                    ? 'Connected to Crossref verification backend.' + (stage ? ' Stage ' + stage + '/5: processing…' : '')
+                    : 'No live verification backend connected.'}
                 </span>
                 <button type="button" onClick={loadSample}>Load sample</button>
               </div>

@@ -1,8 +1,7 @@
-"""Stage 3 – Reference Resolution.
+"""Stage 3 – Reference Resolution (Crossref-only).
 
 For each unique Reference, attempts to resolve it to a canonical paper
-identity using Crossref (DOI look-up and bibliographic search), OpenAlex,
-and Semantic Scholar, in that priority order.
+identity using Crossref (DOI look-up and bibliographic search) as the sole external API.
 """
 from __future__ import annotations
 
@@ -10,17 +9,13 @@ import asyncio
 import difflib
 import re
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
 from app.config import (
     CROSSREF_MAILTO,
-    MAX_RETRIES,
-    OPENALEX_EMAIL,
-    OPENALEX_API_KEY,
     PROVIDER_TIMEOUT,
-    SEMANTIC_SCHOLAR_API_KEY,
 )
 from app.models import CoverageStatus, IdentityStatus, Reference, ResolvedSource
 
@@ -52,7 +47,6 @@ def _extract_surnames(names: list[str]) -> set[str]:
     """Return a set of lower-case surnames extracted from a list of author strings."""
     surnames: set[str] = set()
     for name in names:
-        # "Family, Given" or "Given Family"
         parts = name.split(",")
         surname = parts[0].strip() if len(parts) >= 2 else name.strip().split()[-1]
         surnames.add(surname.lower())
@@ -81,8 +75,17 @@ def _candidate_score(
     return 0.5 * ts + 0.3 * ys + 0.2 * ao
 
 
-def _parse_crossref_work(item: dict) -> tuple[str | None, list[str], int | None, str | None]:
-    """Return (title, authors, year, doi) from a Crossref work item."""
+def _clean_abstract(raw: str | None) -> str | None:
+    """Strip JATS XML tags like <jats:p> from Crossref abstract field."""
+    if not raw:
+        return None
+    cleaned = re.sub(r"<[^>]+>", " ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _parse_crossref_work(item: dict) -> tuple[str | None, list[str], int | None, str | None, str | None, str | None]:
+    """Return (title, authors, year, doi, content_url, abstract) from a Crossref work item."""
     titles = item.get("title") or []
     title: str | None = titles[0] if titles else None
     raw_authors = item.get("author") or []
@@ -100,7 +103,30 @@ def _parse_crossref_work(item: dict) -> tuple[str | None, list[str], int | None,
         except (ValueError, TypeError, IndexError):
             pass
     doi: str | None = item.get("DOI")
-    return title, authors, year, doi
+
+    # Look for accessible direct link in item.link list
+    content_url: str | None = None
+    links = item.get("link") or []
+    for lk in links:
+        url = lk.get("URL")
+        ct = lk.get("content-type", "").lower()
+        if url and ("pdf" in ct or "octet-stream" in ct):
+            content_url = url
+            break
+    if not content_url and links:
+        for lk in links:
+            url = lk.get("URL")
+            if url:
+                content_url = url
+                break
+
+    # Also check abstract if present
+    abstract = _clean_abstract(item.get("abstract"))
+    return title, authors, year, doi, content_url, abstract
+
+
+# In-memory session cache for Crossref lookups
+_CROSSREF_CACHE: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +135,23 @@ def _parse_crossref_work(item: dict) -> tuple[str | None, list[str], int | None,
 
 async def _crossref_doi_lookup(
     doi: str, client: httpx.AsyncClient
-) -> tuple[IdentityStatus, str | None, str | None, list[str], int | None, str | None]:
-    """Return (status, mismatch_note, title, authors, year, canonical_doi)."""
+) -> tuple[IdentityStatus, str | None, str | None, list[str], int | None, str | None, str | None, str | None]:
+    """Return (status, mismatch_note, title, authors, year, canonical_doi, content_url, abstract)."""
     clean_doi = doi.removeprefix("https://doi.org/").strip()
+    cache_key = f"doi:{clean_doi.lower()}"
+    if cache_key in _CROSSREF_CACHE:
+        c = _CROSSREF_CACHE[cache_key]
+        return (
+            c["status"],
+            c.get("mismatch_note"),
+            c.get("title"),
+            c.get("authors", []),
+            c.get("year"),
+            c.get("canonical_doi"),
+            c.get("content_url"),
+            c.get("abstract"),
+        )
+
     url = f"https://api.crossref.org/works/{clean_doi}"
     params: dict = {}
     if CROSSREF_MAILTO:
@@ -134,55 +174,27 @@ async def _crossref_doi_lookup(
             resp = None
 
     if resp is None:
-        # Crossref timed out or connection failed; try exact-DOI lookup through OpenAlex before failing
-        oa_status, oa_title, oa_authors, oa_year, oa_doi = await _openalex_exact_doi_lookup(clean_doi, client)
-        if oa_status == IdentityStatus.matched:
-            return IdentityStatus.matched, None, oa_title, oa_authors, oa_year, oa_doi or clean_doi
-        return IdentityStatus.lookup_failed, None, None, [], None, None
+        return IdentityStatus.lookup_failed, None, None, [], None, None, None, None
 
     if resp.status_code == 404:
-        return IdentityStatus.unresolved, None, None, [], None, None  # caller tries bibliographic
+        return IdentityStatus.unresolved, None, None, [], None, None, None, None
 
     if resp.status_code != 200:
-        # Transient or server error on Crossref; try exact-DOI lookup through OpenAlex
-        oa_status, oa_title, oa_authors, oa_year, oa_doi = await _openalex_exact_doi_lookup(clean_doi, client)
-        if oa_status == IdentityStatus.matched:
-            return IdentityStatus.matched, None, oa_title, oa_authors, oa_year, oa_doi or clean_doi
-        return IdentityStatus.lookup_failed, None, None, [], None, None
+        return IdentityStatus.lookup_failed, None, None, [], None, None, None, None
 
     data = resp.json().get("message", {})
-    title, authors, year, canonical_doi = _parse_crossref_work(data)
-    return IdentityStatus.matched, None, title, authors, year, canonical_doi or doi
-
-
-async def _openalex_exact_doi_lookup(
-    doi: str, client: httpx.AsyncClient
-) -> tuple[IdentityStatus, str | None, list[str], int | None, str | None]:
-    clean_doi = doi.removeprefix("https://doi.org/").strip()
-    url = f"https://api.openalex.org/works/doi:{clean_doi}"
-    params: dict = {}
-    if OPENALEX_API_KEY:
-        params["api_key"] = OPENALEX_API_KEY
-    if OPENALEX_EMAIL:
-        params["mailto"] = OPENALEX_EMAIL
-    try:
-        resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
-        if resp.status_code == 200:
-            data = resp.json()
-            title = data.get("display_name")
-            authors = [
-                a.get("author", {}).get("display_name", "")
-                for a in data.get("authorships", [])
-                if a.get("author", {}).get("display_name")
-            ]
-            year = data.get("publication_year")
-            cand_doi = data.get("doi") or clean_doi
-            return IdentityStatus.matched, title, authors, year, cand_doi
-        if resp.status_code == 404:
-            return IdentityStatus.unresolved, None, [], None, None
-    except Exception:
-        pass
-    return IdentityStatus.lookup_failed, None, [], None, None
+    title, authors, year, canonical_doi, content_url, abstract = _parse_crossref_work(data)
+    entry = {
+        "status": IdentityStatus.matched,
+        "title": title,
+        "authors": authors,
+        "year": year,
+        "canonical_doi": canonical_doi or clean_doi,
+        "content_url": content_url,
+        "abstract": abstract,
+    }
+    _CROSSREF_CACHE[cache_key] = entry
+    return IdentityStatus.matched, None, title, authors, year, canonical_doi or clean_doi, content_url, abstract
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +203,8 @@ async def _openalex_exact_doi_lookup(
 
 async def _crossref_bib_search(
     ref: Reference, client: httpx.AsyncClient
-) -> tuple[IdentityStatus, str | None, list[str], int | None, str | None]:
-    """Return (status, title, authors, year, canonical_doi)."""
+) -> tuple[IdentityStatus, str | None, list[str], int | None, str | None, str | None, str | None]:
+    """Return (status, title, authors, year, canonical_doi, content_url, abstract)."""
     query_parts = [ref.title or ""]
     if ref.authors:
         query_parts.extend(ref.authors[:2])
@@ -200,142 +212,88 @@ async def _crossref_bib_search(
         query_parts.append(str(ref.year))
     query = " ".join(p for p in query_parts if p).strip()
 
+    cache_key = f"bib:{query.lower()}"
+    if cache_key in _CROSSREF_CACHE:
+        c = _CROSSREF_CACHE[cache_key]
+        return (
+            c["status"],
+            c.get("title"),
+            c.get("authors", []),
+            c.get("year"),
+            c.get("canonical_doi"),
+            c.get("content_url"),
+            c.get("abstract"),
+        )
+
     url = "https://api.crossref.org/works"
     params: dict = {
         "query.bibliographic": query,
         "rows": 3,
-        "mailto": CROSSREF_MAILTO or "",
     }
+    if CROSSREF_MAILTO:
+        params["mailto"] = CROSSREF_MAILTO
+
     try:
         resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
     except (httpx.TimeoutException, httpx.ConnectError):
-        return IdentityStatus.lookup_failed, None, [], None, None
+        return IdentityStatus.lookup_failed, None, [], None, None, None, None
+
+    if resp.status_code == 429 or resp.status_code >= 500:
+        return IdentityStatus.lookup_failed, None, [], None, None, None, None
 
     if resp.status_code != 200:
-        return IdentityStatus.lookup_failed, None, [], None, None
+        return IdentityStatus.unresolved, None, [], None, None, None, None
 
     items = resp.json().get("message", {}).get("items") or []
+    if not items:
+        entry = {"status": IdentityStatus.unresolved}
+        _CROSSREF_CACHE[cache_key] = entry
+        return IdentityStatus.unresolved, None, [], None, None, None, None
+
     best_score = 0.0
-    best: tuple[str | None, list[str], int | None, str | None] = (None, [], None, None)
+    best_item: dict | None = None
+    second_best_score = 0.0
 
     for item in items:
-        cand_title, cand_authors, cand_year, cand_doi = _parse_crossref_work(item)
+        cand_title, cand_authors, cand_year, _, _, _ = _parse_crossref_work(item)
         score = _candidate_score(ref, cand_title, cand_authors, cand_year)
         if score > best_score:
+            second_best_score = best_score
             best_score = score
-            best = (cand_title, cand_authors, cand_year, cand_doi)
+            best_item = item
+        elif score > second_best_score:
+            second_best_score = score
 
-    t, a, y, d = best
-    if best_score > 0.7:
-        return IdentityStatus.matched, t, a, y, d
-    if best_score >= 0.5:
-        return IdentityStatus.ambiguous, t, a, y, d
-    return IdentityStatus.unresolved, t, a, y, d
+    if not best_item:
+        return IdentityStatus.unresolved, None, [], None, None, None, None
 
+    title, authors, year, canonical_doi, content_url, abstract = _parse_crossref_work(best_item)
 
-# ---------------------------------------------------------------------------
-# Step 3 – OpenAlex lookup
-# ---------------------------------------------------------------------------
-
-async def _openalex_lookup(
-    canonical_doi: str | None,
-    matched_title: str | None,
-    client: httpx.AsyncClient,
-) -> tuple[str | None, str | None, bool, str | None]:
-    """Return (openalex_id, source_url, is_retracted, retraction_note)."""
-    if canonical_doi:
-        clean_doi = canonical_doi.removeprefix("https://doi.org/").strip()
-        url = f"https://api.openalex.org/works/doi:{clean_doi}"
-        params: dict = {}
-        if OPENALEX_API_KEY:
-            params["api_key"] = OPENALEX_API_KEY
-        if OPENALEX_EMAIL:
-            params["mailto"] = OPENALEX_EMAIL
-    elif matched_title:
-        url = "https://api.openalex.org/works"
-        params = {"search": matched_title, "per-page": 1}
-        if OPENALEX_API_KEY:
-            params["api_key"] = OPENALEX_API_KEY
-        if OPENALEX_EMAIL:
-            params["mailto"] = OPENALEX_EMAIL
+    # Ambiguity check: high similarity on multiple candidates
+    if best_score >= 0.7 and (best_score - second_best_score) < 0.1 and second_best_score >= 0.65:
+        status = IdentityStatus.ambiguous
+    elif best_score > 0.7:
+        status = IdentityStatus.matched
+    elif best_score >= 0.5:
+        status = IdentityStatus.ambiguous
     else:
-        return None, None, False, None
+        status = IdentityStatus.unresolved
 
-    try:
-        resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
-    except (httpx.TimeoutException, httpx.ConnectError):
-        return None, None, False, None
-
-    if resp.status_code != 200:
-        return None, None, False, None
-
-    data = resp.json()
-    # When searching, results come in .results list
-    if "results" in data:
-        results = data.get("results") or []
-        if not results:
-            return None, None, False, None
-        data = results[0]
-
-    openalex_id: str | None = data.get("id")
-    is_retracted: bool = bool(data.get("is_retracted", False))
-    retraction_note: str | None = (
-        "Flagged as retracted by OpenAlex" if is_retracted else None
-    )
-
-    source_url: str | None = None
-    oa_loc = data.get("best_oa_location") or {}
-    source_url = oa_loc.get("pdf_url") or oa_loc.get("url") or None
-
-    return openalex_id, source_url, is_retracted, retraction_note
-
-
-# ---------------------------------------------------------------------------
-# Step 4 – Semantic Scholar fallback
-# ---------------------------------------------------------------------------
-
-async def _s2_lookup(
-    ref_title: str | None, client: httpx.AsyncClient
-) -> tuple[str | None, str | None]:
-    """Return (s2_id, source_url) or (None, None)."""
-    if not ref_title:
-        return None, None
-    url = "https://api.semanticscholar.org/graph/v1/paper/search"
-    params: dict = {
-        "query": ref_title,
-        "fields": "title,year,externalIds,openAccessPdf,isOpenAccess",
-        "limit": 1,
+    entry = {
+        "status": status,
+        "title": title,
+        "authors": authors,
+        "year": year,
+        "canonical_doi": canonical_doi,
+        "content_url": content_url,
+        "abstract": abstract,
     }
-    headers: dict = {}
-    if SEMANTIC_SCHOLAR_API_KEY:
-        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
-
-    try:
-        resp = await client.get(url, params=params, headers=headers, timeout=PROVIDER_TIMEOUT)
-    except (httpx.TimeoutException, httpx.ConnectError):
-        return None, None
-
-    if resp.status_code != 200:
-        return None, None
-
-    data_list = (resp.json().get("data") or [])
-    if not data_list:
-        return None, None
-
-    hit = data_list[0]
-    cand_title = hit.get("title") or ""
-    if _title_similarity(ref_title, cand_title) < 0.8:
-        return None, None
-
-    s2_id: str | None = hit.get("paperId")
-    source_url: str | None = None
-    oa_pdf = hit.get("openAccessPdf") or {}
-    source_url = oa_pdf.get("url") or None
-    return s2_id, source_url
+    _CROSSREF_CACHE[cache_key] = entry
+    return status, title, authors, year, canonical_doi, content_url, abstract
 
 
 # ---------------------------------------------------------------------------
-# Main resolver
+# Main reference resolver
 # ---------------------------------------------------------------------------
 
 async def resolve_reference(
@@ -379,28 +337,21 @@ async def resolve_reference(
                     )
 
     canonical_doi: str | None = None
-    openalex_id: str | None = None
-    s2_id: str | None = None
     matched_title: str | None = None
     matched_authors: list[str] = []
     matched_year: int | None = None
     identity_status: IdentityStatus = IdentityStatus.unresolved
     source_url: str | None = None
-    is_retracted: bool = False
-    retraction_note: str | None = None
+    abstract_text: str | None = None
 
     doi_resolved = False
 
-    # ------------------------------------------------------------------
-    # Step 1 – DOI lookup
-    # ------------------------------------------------------------------
+    # Step 1 – DOI lookup via Crossref
     if ref.doi:
-        status, mismatch, cand_title, cand_authors, cand_year, cand_doi = (
+        status, mismatch, cand_title, cand_authors, cand_year, cand_doi, c_url, c_abs = (
             await _crossref_doi_lookup(ref.doi, client)
         )
         if status == IdentityStatus.lookup_failed:
-            identity_status = IdentityStatus.lookup_failed
-            # Return early: network error – skip bibliographic search too
             return ResolvedSource(
                 source_id=source_id,
                 ref_id=ref.ref_id,
@@ -432,10 +383,11 @@ async def resolve_reference(
                 matched_title = cand_title
                 matched_authors = cand_authors
                 matched_year = cand_year
+                source_url = c_url
+                abstract_text = c_abs
                 doi_resolved = True
             else:
                 identity_status = IdentityStatus.metadata_mismatch
-                # Do NOT proceed with this paper
                 return ResolvedSource(
                     source_id=source_id,
                     ref_id=ref.ref_id,
@@ -452,13 +404,10 @@ async def resolve_reference(
                     retraction_note=None,
                     age_flag=bool(cand_year and cand_year < 2015),
                 )
-        # else: 404 → fall through to bibliographic search
 
-    # ------------------------------------------------------------------
     # Step 2 – Bibliographic search (if no DOI or DOI 404'd)
-    # ------------------------------------------------------------------
     if not doi_resolved:
-        bib_status, cand_title, cand_authors, cand_year, cand_doi = (
+        bib_status, cand_title, cand_authors, cand_year, cand_doi, c_url, c_abs = (
             await _crossref_bib_search(ref, client)
         )
         identity_status = bib_status
@@ -467,42 +416,24 @@ async def resolve_reference(
             matched_authors = cand_authors or []
             matched_year = cand_year
             canonical_doi = cand_doi
+            source_url = c_url
+            abstract_text = c_abs
 
-    # ------------------------------------------------------------------
-    # Step 3 – OpenAlex lookup (for matched identity)
-    # ------------------------------------------------------------------
-    if identity_status == IdentityStatus.matched:
-        openalex_id, oa_url, is_retracted, retraction_note = await _openalex_lookup(
-            canonical_doi, matched_title, client
-        )
-        if oa_url:
-            source_url = oa_url
-
-    # ------------------------------------------------------------------
-    # Step 4 – Semantic Scholar fallback (if still no source_url)
-    # ------------------------------------------------------------------
-    if source_url is None and identity_status in (
-        IdentityStatus.matched,
-        IdentityStatus.ambiguous,
-    ):
-        s2_id, s2_url = await _s2_lookup(matched_title or ref.title, client)
-        if s2_url:
-            source_url = s2_url
-
+    # Store abstract on the source if found from Crossref
     return ResolvedSource(
         source_id=source_id,
         ref_id=ref.ref_id,
         canonical_doi=canonical_doi,
-        openalex_id=openalex_id,
-        s2_id=s2_id,
+        openalex_id=None,
+        s2_id=None,
         matched_title=matched_title,
         matched_authors=matched_authors,
         matched_year=matched_year,
         identity_status=identity_status,
         source_url=source_url,
-        coverage=CoverageStatus.unavailable,  # updated in Stage 4
-        is_retracted=is_retracted,
-        retraction_note=retraction_note,
+        coverage=CoverageStatus.abstract_only if abstract_text and not source_url else CoverageStatus.unavailable,
+        is_retracted=False,
+        retraction_note=None,
         age_flag=bool(matched_year and matched_year < 2015),
     )
 
@@ -528,9 +459,8 @@ async def resolve_all_references(
     """Resolve all references with deduplication and concurrency limit of 3."""
     sem = asyncio.Semaphore(3)
 
-    # Deduplicate: keep one canonical ref per key, but remember all ref_ids
     unique: dict[str, Reference] = {}
-    duplicates: dict[str, list[str]] = {}  # canonical key → list of duplicate ref_ids
+    duplicates: dict[str, list[str]] = {}
 
     for ref in refs:
         key = _ref_key(ref)
@@ -548,7 +478,6 @@ async def resolve_all_references(
             resolved = await resolve_reference(ref, http_client, test_resolver=test_resolver)
         cache[key] = resolved
         results.append(resolved)
-        # Emit cloned sources for duplicate refs (same paper, different ref_ids)
         for dup_ref_id in duplicates[key]:
             dup = resolved.model_copy(
                 update={

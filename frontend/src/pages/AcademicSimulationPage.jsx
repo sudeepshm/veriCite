@@ -587,7 +587,7 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
               </div>
 
               <div className="approved-providers-note">
-                <span>Approved registries queried: <strong>OpenAlex</strong>, <strong>Crossref</strong>, <strong>Semantic Scholar</strong> (fallback).</span>
+                <span>Registry queried: <strong>Crossref</strong> (Crossref-only mode).</span>
               </div>
 
               {/* Search States */}
@@ -630,9 +630,9 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
                 <div className="search-status-box empty">
                   <BookOpen size={20} />
                   {Object.keys(providerErrors).length > 0 ? (
-                    <p>All queried academic providers returned errors or no matches for “{searchQuery}”.</p>
+                    <p>Crossref returned an error or no matches for “{searchQuery}”.</p>
                   ) : (
-                    <p>No matching publications found for “{searchQuery}”. Try refining your query terms.</p>
+                    <p>No matching candidate citations found in Crossref for “{searchQuery}”. Try refining your query terms.</p>
                   )}
                 </div>
               )}
@@ -641,7 +641,7 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
               {searchResults.length > 0 && (
                 <div className="search-results-list" aria-label="Literature search results">
                   <div className="results-header">
-                    <span>Found {searchResults.length} candidate publications:</span>
+                    <span>Found {searchResults.length} candidate citations:</span>
                     <small>Search relevance does not establish source support.</small>
                   </div>
 

@@ -3480,3 +3480,146 @@ svg {
     animation: none;
   }
 }
+
+/* ==========================================================================
+   DOCUMENT WORKSPACE STYLING (Restored & Aligned with ORCID Theme)
+   ========================================================================== */
+
+.panel {
+  background: var(--vc-surface);
+  border: 1px solid var(--vc-border);
+  border-radius: 12px;
+  padding: 26px;
+  margin-bottom: 24px;
+}
+
+.panel h2 {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--vc-ink);
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.document p {
+  color: var(--vc-muted);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+
+.upload {
+  border: 2px dashed #B8D69A;
+  background: var(--vc-brand-wash);
+  padding: 32px 24px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 20px 0 24px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.upload:hover {
+  background: #E8F2D5;
+  border-color: var(--vc-brand);
+}
+
+.upload strong {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--vc-ink);
+}
+
+.upload input[type="file"] {
+  font-size: 0.85rem;
+  color: var(--vc-muted);
+  max-width: 100%;
+  margin-top: 6px;
+}
+
+.workflow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 10px;
+  margin: 0 0 24px;
+}
+
+.workflow span {
+  background: var(--vc-canvas);
+  border: 1px solid var(--vc-border);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 0.8rem;
+  color: var(--vc-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workflow b {
+  color: var(--vc-brand-dark);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.document label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--vc-ink);
+  margin-top: 18px;
+  margin-bottom: 6px;
+}
+
+.document input#title {
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--vc-border);
+  border-radius: 8px;
+  background: var(--vc-surface);
+  color: var(--vc-ink);
+  font-size: 0.95rem;
+  margin-bottom: 16px;
+}
+
+.document textarea#document {
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--vc-border);
+  border-radius: 8px;
+  background: var(--vc-surface);
+  color: var(--vc-ink);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+  line-height: 1.6;
+  resize: vertical;
+  margin-bottom: 16px;
+}
+
+.document input:focus, .document textarea:focus {
+  outline: none;
+  border-color: var(--vc-brand);
+  box-shadow: 0 0 0 3px rgba(166, 206, 57, 0.2);
+}
+
+.document .actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.document small {
+  display: block;
+  color: var(--vc-muted);
+  font-size: 0.8rem;
+  margin-top: 16px;
+  line-height: 1.5;
+}
+

@@ -72,55 +72,46 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('bad',result['provider_errors'])
         self.assertNotIn('secret',str(result))
 
-    async def test_semantic_scholar_zero_calls_on_primary_success(self):
-        """When primary lookup succeeds, Semantic Scholar should receive zero calls."""
-        primary_openalex = AsyncMock(return_value=[{'title': 'Primary Paper', 'doi': '10.1/test'}])
-        primary_crossref = AsyncMock(return_value=[])
-        fallback_s2 = AsyncMock(return_value=[{'title': 'S2 Paper', 'doi': '10.1/s2'}])
-        with patch.dict('integrations.providers.PRIMARY_SEARCH_PROVIDERS', {'openalex': primary_openalex, 'crossref': primary_crossref}, clear=True), \
-             patch.dict('integrations.providers.SEARCH_PROVIDERS', {'openalex': primary_openalex, 'crossref': primary_crossref, 'semantic_scholar': fallback_s2}, clear=True):
+    async def test_crossref_only_search(self):
+        """In Crossref-only mode, only Crossref is queried."""
+        primary_crossref = AsyncMock(return_value=[{'title': 'Crossref Paper', 'doi': '10.1/crossref', 'source': 'crossref'}])
+        with patch.dict('integrations.providers.SEARCH_PROVIDERS', {'crossref': primary_crossref}, clear=True):
             result = await search_all('test query')
             self.assertEqual(len(result['papers']), 1)
-            self.assertEqual(result['papers'][0]['title'], 'Primary Paper')
-            fallback_s2.assert_not_called()
+            self.assertEqual(result['papers'][0]['title'], 'Crossref Paper')
+            primary_crossref.assert_called_once()
 
-    async def test_open_access_fallback_retains_openalex_metadata(self):
-        """Case 1: OpenAlex has metadata only, Semantic Scholar has the PDF -> return that PDF and retain OpenAlex metadata."""
+    async def test_open_access_crossref_link(self):
+        """Crossref open access extracts direct link from item.link."""
         from integrations.providers import open_access_lookup
-        mock_oa_data = {
-            "doi": "https://doi.org/10.1234/test",
-            "display_name": "Test Title From OpenAlex",
-            "publication_year": 2024,
-            "open_access": {"is_oa": False},
-            "best_oa_location": {"pdf_url": None, "landing_page_url": "https://openalex.org/landing"},
-        }
-        mock_s2_data = {
-            "url": "https://semanticscholar.org/paper/test",
-            "openAccessPdf": {"url": "https://s2.org/download.pdf"},
+        mock_cr_data = {
+            "message": {
+                "DOI": "10.1234/test",
+                "URL": "https://doi.org/10.1234/test",
+                "link": [{"URL": "https://publisher.com/paper.pdf", "content-type": "application/pdf"}],
+            }
         }
 
         async def fake_get_json(client, url, params=None, headers=None):
-            if "openalex.org" in url:
-                return mock_oa_data
-            if "semanticscholar.org" in url:
-                return mock_s2_data
-            raise ValueError("Unknown URL")
+            if "api.crossref.org" in url:
+                return mock_cr_data
+            raise ValueError(f"Unknown URL {url}")
 
         with patch("integrations.providers.get_json", side_effect=fake_get_json):
             async with httpx.AsyncClient() as client:
                 res = await open_access_lookup(client, "10.1234/test")
                 self.assertEqual(res["status"], "success")
                 self.assertTrue(res["is_oa"])
-                self.assertEqual(res["url_for_pdf"], "https://s2.org/download.pdf")
-                self.assertEqual(res["url_for_landing_page"], "https://openalex.org/landing")
-                self.assertEqual(res["source"], "openalex")
+                self.assertEqual(res["url_for_pdf"], "https://publisher.com/paper.pdf")
+                self.assertEqual(res["url_for_landing_page"], "https://doi.org/10.1234/test")
+                self.assertEqual(res["source"], "crossref")
 
-    async def test_open_access_both_fail_returns_lookup_failed(self):
-        """Case 2: Both providers time out -> return lookup_failed with access status unknown."""
+    async def test_open_access_timeout_returns_lookup_failed(self):
+        """Crossref timeout returns lookup_failed with access status unknown."""
         from integrations.providers import open_access_lookup
 
         async def fake_timeout(client, url, params=None, headers=None):
-            raise httpx.ReadTimeout("Timeout connecting to provider")
+            raise httpx.ReadTimeout("Timeout connecting to Crossref")
 
         with patch("integrations.providers.get_json", side_effect=fake_timeout):
             async with httpx.AsyncClient() as client:

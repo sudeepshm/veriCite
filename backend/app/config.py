@@ -24,22 +24,10 @@ _ENV_FILE: Path = _BACKEND_DIR / ".env"
 load_dotenv(dotenv_path=_ENV_FILE, override=False)
 
 # ---------------------------------------------------------------------------
-# Gemini / LLM
+# Crossref credentials & contact
 # ---------------------------------------------------------------------------
 
-GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
-
-# ---------------------------------------------------------------------------
-# External provider credentials
-# ---------------------------------------------------------------------------
-
-OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
 CROSSREF_MAILTO: str = os.getenv("CROSSREF_MAILTO", "")
-# OPENALEX_EMAIL falls back to CROSSREF_MAILTO if not set explicitly
-OPENALEX_EMAIL: str = os.getenv("OPENALEX_EMAIL", "") or CROSSREF_MAILTO
-SEMANTIC_SCHOLAR_API_KEY: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
-UNPAYWALL_EMAIL: str = os.getenv("UNPAYWALL_EMAIL", "")
 
 # ---------------------------------------------------------------------------
 # Embeddings
@@ -70,13 +58,7 @@ MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
 
 
 __all__ = [
-    "GEMINI_API_KEY",
-    "GEMINI_MODEL",
     "CROSSREF_MAILTO",
-    "OPENALEX_EMAIL",
-    "OPENALEX_API_KEY",
-    "SEMANTIC_SCHOLAR_API_KEY",
-    "UNPAYWALL_EMAIL",
     "EMBEDDING_MODEL",
     "DB_PATH",
     "MAX_FILE_SIZE_MB",

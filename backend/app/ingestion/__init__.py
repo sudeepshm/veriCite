@@ -49,13 +49,93 @@ def _detect_format(filename: str, content_type: str) -> str:
 # Docling parsing
 # ---------------------------------------------------------------------------
 
+def _fitz_blocks(
+    content: bytes, filename: str, document_id: str
+) -> list[DocumentBlock]:
+    """Parse PDF via PyMuPDF (fitz) and return DocumentBlock list."""
+    import fitz
+
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+    except Exception as exc:
+        raise ValueError(f"PyMuPDF PDF parsing failed: {exc}") from exc
+
+    blocks: list[DocumentBlock] = []
+    index = 0
+    char_offset = 0
+    current_section: str | None = None
+    in_bib = False
+
+    for page_num, page in enumerate(doc):
+        # Extract text blocks
+        page_blocks = page.get_text("blocks")
+        for b in page_blocks:
+            text = b[4].strip()
+            if not text:
+                continue
+
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            first_line = lines[0] if lines else ""
+
+            is_heading = (
+                len(lines) <= 2
+                and len(text) < 100
+                and not any(punct in text for punct in [".", ",", ";"])
+                and (
+                    re.match(r"^(\d+(\.\d+)*\s+[A-Z][a-zA-Z\s]+|[A-Z][a-zA-Z\s]+)$", first_line)
+                    or any(tok == first_line.lower() for tok in ("abstract", "introduction", "references", "bibliography", "method", "methods", "results", "discussion", "conclusion"))
+                )
+            )
+
+            if is_heading:
+                current_section = first_line
+                norm = current_section.lower()
+                if "reference" in norm or "bibliography" in norm:
+                    in_bib = True
+                else:
+                    in_bib = False
+
+            if in_bib and not is_heading:
+                btype = BlockType.bibliography
+            elif is_heading:
+                btype = BlockType.heading
+            else:
+                btype = BlockType.text
+
+            char_start = char_offset
+            char_end = char_offset + len(text)
+            char_offset = char_end + 1
+
+            blocks.append(
+                DocumentBlock(
+                    block_id=f"{document_id}_b{index:04d}",
+                    document_id=document_id,
+                    block_type=btype,
+                    text=text,
+                    section=current_section,
+                    page=page_num + 1,
+                    char_start=char_start,
+                    char_end=char_end,
+                )
+            )
+            index += 1
+
+    if not blocks:
+        raise ValueError("Parsing yielded no usable content from PDF")
+
+    return blocks
+
+
 def _docling_blocks(
     content: bytes, filename: str, document_id: str
 ) -> list[DocumentBlock]:
-    """Parse PDF/DOCX via Docling and return DocumentBlock list."""
+    """Parse PDF/DOCX via Docling (with PyMuPDF fallback for PDFs) and return DocumentBlock list."""
+    suffix = (pathlib.Path(filename).suffix or "").lower()
     try:
         from docling.document_converter import DocumentConverter
     except ImportError as exc:
+        if suffix == ".pdf" or filename.lower().endswith(".pdf"):
+            return _fitz_blocks(content, filename, document_id)
         raise ValueError(f"Parsing failed: docling not installed — {exc}") from exc
 
     suffix = pathlib.Path(filename).suffix or ".pdf"

@@ -1,8 +1,8 @@
-"""Stage 4 – Source Retrieval and Passage Ranking.
+"""Stage 4 – Source Retrieval and Passage Ranking (Crossref-only).
 
-Downloads each ResolvedSource (PDF or abstract), parses it with Docling,
-embeds the resulting passages with sentence-transformers, and returns the
-most relevant passages ranked against the supplied claim texts.
+Downloads each ResolvedSource if an accessible content link was supplied by its matched
+Crossref record, or uses the Crossref record abstract.
+Passages are extracted, embedded with sentence-transformers, and ranked against claim texts.
 """
 from __future__ import annotations
 
@@ -17,12 +17,10 @@ import httpx
 import numpy as np
 
 from app.config import (
+    CROSSREF_MAILTO,
     EMBEDDING_MODEL,
     MAX_DOWNLOAD_SIZE_MB,
-    OPENALEX_API_KEY,
-    OPENALEX_EMAIL,
     PROVIDER_TIMEOUT,
-    SEMANTIC_SCHOLAR_API_KEY,
 )
 from app.models import CoverageStatus, DocumentBlock, Passage, ResolvedSource
 
@@ -68,7 +66,6 @@ def _lexical_boost(claim: str, passage_text: str) -> float:
     claim_words = set(re.findall(r"\b[a-z]{4,}\b", claim.lower()))
     passage_words = set(re.findall(r"\b[a-z]{4,}\b", passage_text.lower()))
     overlap = claim_words & passage_words
-    # At least 3 meaningful content words shared
     if len(overlap) >= 3:
         return 0.05
     return 0.0
@@ -88,93 +85,34 @@ def _chunk_abstract(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Abstract fetchers (fallback when no PDF)
+# Crossref abstract retrieval
 # ---------------------------------------------------------------------------
 
-async def _fetch_abstract_openalex(
-    openalex_id: str | None, canonical_doi: str | None, client: httpx.AsyncClient
-) -> str | None:
-    params: dict = {}
-    if OPENALEX_API_KEY:
-        params["api_key"] = OPENALEX_API_KEY
-    if OPENALEX_EMAIL:
-        params["mailto"] = OPENALEX_EMAIL
-
-    if openalex_id:
-        # Convert public work URL (e.g. https://openalex.org/W...) to API work URL
-        clean_id = openalex_id.strip()
-        if "openalex.org/" in clean_id:
-            work_short = clean_id.split("openalex.org/")[-1].strip("/")
-            url = f"https://api.openalex.org/works/{work_short}"
-        else:
-            url = f"https://api.openalex.org/works/{clean_id}"
-    elif canonical_doi:
-        clean_doi = canonical_doi.removeprefix("https://doi.org/").strip()
-        url = f"https://api.openalex.org/works/doi:{clean_doi}"
-    else:
+async def _fetch_abstract_crossref(canonical_doi: str | None, client: httpx.AsyncClient) -> str | None:
+    """Fetch abstract directly from Crossref record if not already parsed."""
+    if not canonical_doi:
         return None
+    clean_doi = canonical_doi.removeprefix("https://doi.org/").strip()
+    url = f"https://api.crossref.org/works/{clean_doi}"
+    params: dict = {}
+    if CROSSREF_MAILTO:
+        params["mailto"] = CROSSREF_MAILTO
     try:
         resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
         if resp.status_code == 200:
-            data = resp.json()
-            # OpenAlex stores abstract as inverted index
-            inv = data.get("abstract_inverted_index")
-            if inv:
-                # Reconstruct
-                word_pos: list[tuple[int, str]] = []
-                for word, positions in inv.items():
-                    for pos in positions:
-                        word_pos.append((pos, word))
-                word_pos.sort()
-                return " ".join(w for _, w in word_pos)
-    except (httpx.TimeoutException, httpx.ConnectError, Exception):
+            data = resp.json().get("message", {})
+            raw_abstract = data.get("abstract")
+            if raw_abstract:
+                cleaned = re.sub(r"<[^>]+>", " ", raw_abstract)
+                cleaned = re.sub(r"\s+", " ", cleaned).strip()
+                return cleaned or None
+    except Exception:
         pass
     return None
-
-
-async def _fetch_abstract_s2(
-    canonical_doi: str | None,
-    matched_title: str | None,
-    client: httpx.AsyncClient,
-) -> str | None:
-    if canonical_doi:
-        query = canonical_doi
-        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{canonical_doi}"
-        params: dict = {"fields": "abstract"}
-    elif matched_title:
-        url = "https://api.semanticscholar.org/graph/v1/paper/search"
-        params = {"query": matched_title, "fields": "abstract", "limit": 1}
-    else:
-        return None
-
-    headers: dict = {}
-    if SEMANTIC_SCHOLAR_API_KEY:
-        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
-
-    try:
-        resp = await client.get(url, params=params, headers=headers, timeout=PROVIDER_TIMEOUT)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Search returns .data list
-            if "data" in data:
-                items = data["data"]
-                if items:
-                    return items[0].get("abstract")
-            return data.get("abstract")
-    except (httpx.TimeoutException, httpx.ConnectError, Exception):
-        pass
-    return None
-
-
-async def _get_abstract(source: ResolvedSource, client: httpx.AsyncClient) -> str | None:
-    abstract = await _fetch_abstract_openalex(source.openalex_id, source.canonical_doi, client)
-    if abstract:
-        return abstract
-    return await _fetch_abstract_s2(source.canonical_doi, source.matched_title, client)
 
 
 # ---------------------------------------------------------------------------
-# Download
+# Direct download of accessible paper from matched Crossref record link
 # ---------------------------------------------------------------------------
 
 async def _download_pdf(
@@ -195,9 +133,7 @@ async def _download_pdf(
 
             content_type = resp.headers.get("content-type", "").lower()
 
-            # HTML check: may be login page
             if "text/html" in content_type:
-                # Read first 2000 bytes to check
                 chunk_data = b""
                 async for chunk in resp.aiter_bytes(chunk_size=2048):
                     chunk_data += chunk
@@ -215,7 +151,6 @@ async def _download_pdf(
             if not is_pdf:
                 return None, "type"
 
-            # Stream to temp file
             suffix = ".pdf"
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             downloaded = 0
@@ -236,12 +171,11 @@ async def _download_pdf(
 
 
 # ---------------------------------------------------------------------------
-# Docling parse
+# PDF parse (Docling with PyMuPDF fallback)
 # ---------------------------------------------------------------------------
 
 def _parse_pdf(tmp_path: Path) -> list[tuple[str, str | None, int | None, str | None]]:
-    """
-    Parse a PDF with Docling.
+    """Parse a PDF with Docling, with PyMuPDF fallback.
     Returns list of (text, section, page, table_context).
     """
     try:
@@ -255,13 +189,11 @@ def _parse_pdf(tmp_path: Path) -> list[tuple[str, str | None, int | None, str | 
         current_section: str | None = None
 
         for item, level in doc.iterate_items():
-            # Determine section from headings
             item_type = type(item).__name__.lower()
             text_content: str = ""
             page_num: int | None = None
             table_context: str | None = None
 
-            # Extract page number if available
             if hasattr(item, "prov") and item.prov:
                 try:
                     page_num = item.prov[0].page_no
@@ -271,7 +203,7 @@ def _parse_pdf(tmp_path: Path) -> list[tuple[str, str | None, int | None, str | 
             if "heading" in item_type or "section" in item_type:
                 if hasattr(item, "text"):
                     current_section = item.text
-                continue  # don't emit headings as passages
+                continue
 
             if "table" in item_type:
                 try:
@@ -294,6 +226,22 @@ def _parse_pdf(tmp_path: Path) -> list[tuple[str, str | None, int | None, str | 
             if len(text_content) >= 20:
                 chunks.append((text_content, current_section, page_num, table_context))
 
+        if chunks:
+            return chunks
+    except Exception:
+        pass
+
+    # PyMuPDF fallback
+    try:
+        import fitz
+        doc = fitz.open(str(tmp_path))
+        chunks = []
+        for page_num, page in enumerate(doc):
+            blocks = page.get_text("blocks")
+            for b in blocks:
+                text = b[4].strip()
+                if len(text) >= 20:
+                    chunks.append((text, None, page_num + 1, None))
         return chunks
     except Exception:
         return []
@@ -318,26 +266,22 @@ def _rank_passages(
 
     try:
         passage_texts = [p.verbatim_text for p in passages]
-        passage_embeddings = _embed_texts(passage_texts)
+        p_embeds = _embed_texts(passage_texts)
+        c_embeds = _embed_texts(claims_text)
 
-        # Store embeddings back into passages
-        for i, p in enumerate(passages):
-            p.embedding = passage_embeddings[i].tolist()
+        mean_claim_embed = np.mean(c_embeds, axis=0)
 
-        # Score each passage per claim, accumulate max
-        scores = np.zeros(len(passages))
+        scores = []
+        for idx, p in enumerate(passages):
+            cos_sim = _cosine_similarity(p_embeds[idx], mean_claim_embed)
+            boost = max(_lexical_boost(c, p.verbatim_text) for c in claims_text)
+            scores.append((cos_sim + boost, idx))
 
-        for claim in claims_text:
-            claim_emb = _embed_texts([claim])[0]
-            for i, (p_emb, passage) in enumerate(zip(passage_embeddings, passages)):
-                sim = _cosine_similarity(claim_emb, p_emb)
-                boost = _lexical_boost(claim, passage.verbatim_text)
-                combined = sim + boost
-                scores[i] = max(scores[i], combined)
+        scores.sort(key=lambda x: x[0], reverse=True)
+        ranked_indices = [idx for _, idx in scores]
 
-        ranked_indices = np.argsort(scores)[::-1]
-        seen: set[str] = set()
         top_passages: list[Passage] = []
+        seen = set()
         for idx in ranked_indices:
             if len(top_passages) >= top_k:
                 break
@@ -359,21 +303,16 @@ async def retrieve_source(
     claims_text: list[str],
     client: httpx.AsyncClient,
 ) -> tuple[ResolvedSource, list[Passage]]:
-    """Download, parse, embed, and rank passages for a single ResolvedSource."""
+    """Download, parse, embed, and rank passages for a single ResolvedSource using Crossref data."""
 
     coverage = CoverageStatus.unavailable
     passages: list[Passage] = []
     tmp_path: Path | None = None
-
-    # ------------------------------------------------------------------
-    # Step 1 – Download (or get abstract if no URL, or load offline file)
-    # ------------------------------------------------------------------
-    # Step 1 – Fetch: local file (if explicitly set by resolver) or remote
-    # ------------------------------------------------------------------
     abstract_text: str | None = None
     have_pdf = False
     raw_chunks: list[tuple[str, str | None, int | None, str | None]] = []
 
+    # Check for local file path override (test resolver)
     local_file: Path | None = None
     if source.source_url:
         cleaned_url = source.source_url.removeprefix("file://")
@@ -385,39 +324,34 @@ async def retrieve_source(
         try:
             content_str = local_file.read_text(encoding="utf-8", errors="replace")
             chunks = [s.strip() for s in content_str.splitlines() if len(s.strip()) > 10]
-            raw_chunks = [
-                (c, local_file.name, None, None) for c in chunks
-            ]
+            raw_chunks = [(c, local_file.name, None, None) for c in chunks]
             coverage = CoverageStatus.full_text
         except Exception:
             raw_chunks = []
     elif source.source_url is None:
-        abstract_text = await _get_abstract(source, client)
+        # No content link from Crossref: try fetching Crossref abstract
+        abstract_text = await _fetch_abstract_crossref(source.canonical_doi, client)
         coverage = CoverageStatus.abstract_only if abstract_text else CoverageStatus.unavailable
     else:
+        # Download accessible link from Crossref record
         tmp_path, dl_status = await _download_pdf(source.source_url, client)
         if dl_status == "ok" and tmp_path is not None:
             have_pdf = True
         else:
-            # Fallback: try abstract
-            if dl_status in ("login", "type", "timeout", "size", "error"):
-                abstract_text = await _get_abstract(source, client)
+            abstract_text = await _fetch_abstract_crossref(source.canonical_doi, client)
             coverage = CoverageStatus.abstract_only if abstract_text else CoverageStatus.unavailable
 
-    # ------------------------------------------------------------------
-    # Step 2 – Parse (if PDF was downloaded)
-    # ------------------------------------------------------------------
+    # Step 2 – Parse downloaded PDF
     if have_pdf and tmp_path is not None:
         try:
             raw_chunks = _parse_pdf(tmp_path)
             if raw_chunks:
                 coverage = CoverageStatus.full_text
             else:
-                # Docling returned nothing — fall back to abstract
-                abstract_text = await _get_abstract(source, client)
+                abstract_text = await _fetch_abstract_crossref(source.canonical_doi, client)
                 coverage = CoverageStatus.abstract_only if abstract_text else CoverageStatus.unavailable
         except Exception:
-            abstract_text = await _get_abstract(source, client)
+            abstract_text = await _fetch_abstract_crossref(source.canonical_doi, client)
             coverage = CoverageStatus.abstract_only if abstract_text else CoverageStatus.unavailable
         finally:
             if tmp_path and tmp_path.exists():
@@ -435,9 +369,7 @@ async def retrieve_source(
         updated = source.model_copy(update={"coverage": CoverageStatus.unavailable})
         return updated, []
 
-    # ------------------------------------------------------------------
     # Step 3 – Create Passage objects
-    # ------------------------------------------------------------------
     for chunk_text, section, page, table_context in raw_chunks:
         passages.append(
             Passage(
@@ -449,56 +381,55 @@ async def retrieve_source(
                 char_start=None,
                 char_end=None,
                 table_context=table_context,
-                embedding=None,  # filled in step 4
+                embedding=None,
             )
         )
 
-    # ------------------------------------------------------------------
     # Step 4 – Embed and rank
-    # ------------------------------------------------------------------
     if claims_text:
         try:
             passages = _rank_passages(passages, claims_text, top_k=10)
         except Exception:
-            # If embedding fails (model not downloaded, etc.) return unranked first 10
             passages = passages[:10]
 
     updated = source.model_copy(update={"coverage": coverage})
     return updated, passages
 
 
-# ---------------------------------------------------------------------------
-# Batch retrieval
-# ---------------------------------------------------------------------------
-
 async def retrieve_all_sources(
     sources: list[ResolvedSource],
     claims_text: list[str],
-    max_concurrent: int = 3,
+    client: httpx.AsyncClient | None = None,
 ) -> tuple[list[ResolvedSource], list[Passage]]:
-    """Retrieve and rank passages for all sources concurrently."""
-    sem = asyncio.Semaphore(max_concurrent)
+    """Retrieve and process all sources concurrently with limit of 3."""
+    sem = asyncio.Semaphore(3)
+
+    async def _process_one(s: ResolvedSource, http_client: httpx.AsyncClient):
+        async with sem:
+            return await retrieve_source(s, claims_text, http_client)
+
+    if client is not None:
+        tasks = [_process_one(s, client) for s in sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    else:
+        async with httpx.AsyncClient(follow_redirects=True) as local_client:
+            tasks = [_process_one(s, local_client) for s in sources]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
     updated_sources: list[ResolvedSource] = []
     all_passages: list[Passage] = []
 
-    async def _retrieve_one(source: ResolvedSource, client: httpx.AsyncClient) -> None:
-        async with sem:
-            updated, passages = await retrieve_source(source, claims_text, client)
-        updated_sources.append(updated)
-        all_passages.extend(passages)
-
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        tasks = [
-            asyncio.create_task(_retrieve_one(source, client))
-            for source in sources
-            if source.identity_status.value in ("matched", "ambiguous")
-        ]
-        # Sources that couldn't be resolved still get coverage=unavailable
-        for source in sources:
-            if source.identity_status.value not in ("matched", "ambiguous"):
-                updated_sources.append(
-                    source.model_copy(update={"coverage": CoverageStatus.unavailable})
-                )
-        await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            continue
+        src, plist = r
+        updated_sources.append(src)
+        all_passages.extend(plist)
 
     return updated_sources, all_passages
+
+
+__all__ = [
+    "retrieve_source",
+    "retrieve_all_sources",
+]
