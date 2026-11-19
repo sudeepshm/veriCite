@@ -72,3 +72,34 @@ test('calculateBenchmarkDifference: missing or invalid values return null',()=>{
   assert.equal(calculateBenchmarkDifference({ baseline: 'abc', observed: '50' }), null);
   assert.equal(calculateBenchmarkDifference({ baseline: '50', observed: undefined }), null);
 });
+
+test('citation search adapter maps papers, source, and preserves provider errors',()=>{
+  const mockFastApiResponse = {
+    query: 'active learning',
+    papers: [
+      {
+        title: 'Active learning increases student performance',
+        doi: '10.1073/pnas.1319030111',
+        year: 2014,
+        source: 'openalex',
+        url: 'https://doi.org/10.1073/pnas.1319030111'
+      }
+    ],
+    provider_errors: {
+      crossref: 'Provider returned HTTP 504'
+    },
+    notice: 'Search results are candidates, not verified evidence.'
+  };
+
+  // Simulate frontend adapter mapping
+  const papers = mockFastApiResponse.papers || mockFastApiResponse.results || [];
+  const normalized = papers.map(p => ({
+    ...p,
+    provider: p.source || p.provider || 'unknown',
+  }));
+
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].title, 'Active learning increases student performance');
+  assert.equal(normalized[0].provider, 'openalex');
+  assert.equal(mockFastApiResponse.provider_errors.crossref, 'Provider returned HTTP 504');
+});

@@ -99,6 +99,7 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState(null);
+  const [providerErrors, setProviderErrors] = useState({});
   const [searchResults, setSearchResults] = useState([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [saveToast, setSaveToast] = useState(false);
@@ -206,13 +207,21 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
 
     setIsSearching(true);
     setSearchError(null);
+    setProviderErrors({});
     setHasSearched(true);
 
     try {
-      // Pass approved provider whitelist: openalex, crossref, semantic_scholar
-      const res = await searchEvidence(q, 6, 'openalex,crossref,semantic_scholar');
-      const results = res.results || [];
-      setSearchResults(results);
+      // Omit explicit providers so backend fallback policy (OpenAlex/Crossref primary -> Semantic Scholar fallback) is respected
+      const res = await searchEvidence(q, 6);
+      const papers = res.papers || res.results || [];
+      const normalizedPapers = papers.map((p) => ({
+        ...p,
+        provider: p.source || p.provider || 'unknown',
+      }));
+      setSearchResults(normalizedPapers);
+      if (res.provider_errors && Object.keys(res.provider_errors).length > 0) {
+        setProviderErrors(res.provider_errors);
+      }
     } catch (err) {
       setSearchError(err.message || 'Unable to contact evidence search endpoint. Check backend connection.');
       setSearchResults([]);
@@ -568,10 +577,29 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
                 </div>
               )}
 
+              {/* Partial provider failure banner when some results still retrieved */}
+              {!isSearching && Object.keys(providerErrors).length > 0 && (
+                <div className="search-status-box warning partial-provider-warning" role="status">
+                  <AlertCircle size={16} />
+                  <div>
+                    <strong>Notice: Some registries encountered errors</strong>
+                    <ul className="provider-error-list">
+                      {Object.entries(providerErrors).map(([prov, err]) => (
+                        <li key={prov}><strong>{prov}</strong>: {err}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+
               {!isSearching && hasSearched && searchResults.length === 0 && !searchError && (
                 <div className="search-status-box empty">
                   <BookOpen size={20} />
-                  <p>No matching publications found for “{searchQuery}”. Try refining your query terms.</p>
+                  {Object.keys(providerErrors).length > 0 ? (
+                    <p>All queried academic providers returned errors or no matches for “{searchQuery}”.</p>
+                  ) : (
+                    <p>No matching publications found for “{searchQuery}”. Try refining your query terms.</p>
+                  )}
                 </div>
               )}
 

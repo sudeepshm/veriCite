@@ -109,7 +109,7 @@ async def assess_claim_reference_pair(
             confidence_basis="Metadata mismatch prevents safe comparison.",
         )
 
-    if source.identity_status in (IdentityStatus.unresolved, IdentityStatus.lookup_failed):
+    if source.identity_status in (IdentityStatus.unresolved, IdentityStatus.lookup_failed, IdentityStatus.ambiguous):
         return Assessment(
             assessment_id=assessment_id,
             claim_id=claim.claim_id,
@@ -117,11 +117,15 @@ async def assess_claim_reference_pair(
             assessment_status=AssessmentStatus.unable_to_assess,
             semantic_verdict=None,
             evidence_passage_ids=[],
-            explanation="Source reference could not be resolved to a known publication.",
-            issue_flags=["unresolved_source", *issue_flags],
+            explanation=(
+                "Source identity is ambiguous between multiple candidate publications; automatic assessment halted."
+                if source.identity_status == IdentityStatus.ambiguous
+                else "Source reference could not be resolved to a known publication."
+            ),
+            issue_flags=["ambiguous_identity" if source.identity_status == IdentityStatus.ambiguous else "unresolved_source", *issue_flags],
             human_review_status=HumanReviewStatus.pending,
             confidence_score=None,
-            confidence_basis="Source reference unverified.",
+            confidence_basis="Source reference unconfirmed.",
         )
 
     # If no passages are available
@@ -239,6 +243,24 @@ async def assess_claim_reference_pair(
                 # Check polarity: if polarities conflict (e.g. "not 10 percentage points"), abstain from support
                 if _has_negation(c_lower) != _has_negation(p_lower):
                     continue
+
+                claim_dir = _get_direction(c_lower)
+                pass_dir = _get_direction(p_lower)
+                # If directions conflict (e.g., decreased vs increased/gain), return CONTRADICTORY
+                if claim_dir and pass_dir and claim_dir != pass_dir:
+                    return Assessment(
+                        assessment_id=assessment_id,
+                        claim_id=claim.claim_id,
+                        ref_id=source.ref_id,
+                        assessment_status=AssessmentStatus.assessed,
+                        semantic_verdict=SemanticVerdict.CONTRADICTORY,
+                        evidence_passage_ids=[passage.passage_id],
+                        explanation=f"Direction conflict: claim states {claim_dir} but source reports {pass_dir}.",
+                        issue_flags=issue_flags,
+                        human_review_status=HumanReviewStatus.pending,
+                        confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
+                        confidence_basis=f"Strict numerical comparator rule ({coverage_str}).",
+                    )
 
                 claim_val = _extract_metric_quantity(c_lower, claim_unit)
                 passage_val = _extract_metric_quantity(p_lower, claim_unit)

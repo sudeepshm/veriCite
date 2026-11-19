@@ -504,6 +504,63 @@ References
         claim_texts = [c["original_span"] for c in report["claims"]]
         self.assertEqual(len(set(claim_texts)), 3, "All 3 claims must be unique")
 
+    async def test_direction_conflict_decrease_vs_increase_verdict(self):
+        """Require direction agreement before issuing support: claim decreased 10 pp vs source increased 10 pp must NEVER be SUPPORTED."""
+        claim = Claim(
+            claim_id="clm_dir_test",
+            document_id="doc_dir_test",
+            block_id="blk_1",
+            original_span="Accuracy decreased by 10 percentage points in the adult pilot [1].",
+            normalized_text="Accuracy decreased by 10 percentage points in the adult pilot.",
+            sentence_index=0,
+            qualifiers="",
+        )
+        source = ResolvedSource(
+            source_id="src_1",
+            ref_id="ref_1",
+            identity_status=IdentityStatus.matched,
+            matched_title="Pilot paper",
+            coverage=CoverageStatus.full_text,
+        )
+        passage = Passage(
+            passage_id="pas_1",
+            source_id="src_1",
+            verbatim_text="In the adult pilot, the absolute accuracy gain was 10 percentage points.",
+            section="Results",
+        )
+        assessment = await assess_claim_reference_pair(claim, source, [passage])
+        self.assertNotEqual(assessment.semantic_verdict, SemanticVerdict.SUPPORTED, "Direction reversal must never return SUPPORTED")
+        self.assertEqual(assessment.semantic_verdict, SemanticVerdict.CONTRADICTORY, "Decreased vs gain/increased must return CONTRADICTORY")
+
+    async def test_ambiguous_source_identity_halts_automatic_assessment(self):
+        """Ambiguous source identity must route to unable_to_assess and halt automatic support."""
+        claim = Claim(
+            claim_id="clm_amb_test",
+            document_id="doc_amb_test",
+            block_id="blk_1",
+            original_span="Accuracy rose from 50% to 60% in the adult pilot [1].",
+            normalized_text="Accuracy rose from 50% to 60% in the adult pilot.",
+            sentence_index=0,
+            qualifiers="",
+        )
+        source = ResolvedSource(
+            source_id="src_1",
+            ref_id="ref_1",
+            identity_status=IdentityStatus.ambiguous,
+            matched_title="Ambiguous Paper Title",
+            coverage=CoverageStatus.full_text,
+        )
+        passage = Passage(
+            passage_id="pas_1",
+            source_id="src_1",
+            verbatim_text="Accuracy rose from 50% to 60% in the adult pilot.",
+            section="Results",
+        )
+        assessment = await assess_claim_reference_pair(claim, source, [passage])
+        self.assertEqual(assessment.assessment_status, AssessmentStatus.unable_to_assess)
+        self.assertIsNone(assessment.semantic_verdict)
+        self.assertIn("ambiguous_identity", assessment.issue_flags)
+
 
 if __name__ == "__main__":
     unittest.main()
