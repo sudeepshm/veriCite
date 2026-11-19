@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   FlaskConical, 
   Search, 
@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { calculateBenchmarkDifference } from '../simulationCalculations';
 import { searchEvidence } from '../api';
+import { useRouter } from '../router';
 
 const DRAFT_STORAGE_KEY = 'vericite-simulation-v1';
 
@@ -88,17 +89,7 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
     } catch {
       // ignore
     }
-    return {
-      claim: '',
-      environment: 'simulation',
-      conditions: '',
-      comparatorName: '',
-      metric: '',
-      baselineValue: '',
-      observedValue: '',
-      unit: '',
-      attachedCitations: []
-    };
+    return SAMPLE_SIMULATION;
   });
 
   // Modal / selector for choosing from current manuscript
@@ -111,6 +102,27 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
   const [searchResults, setSearchResults] = useState([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [saveToast, setSaveToast] = useState(false);
+  const [calcFlash, setCalcFlash] = useState(false);
+  const { search } = useRouter();
+
+  // Scroll to Step 4 if ?step=4 in URL
+  useEffect(() => {
+    if (search && (search.includes('step=4') || search.includes('find-citations'))) {
+      const el = document.getElementById('step4-heading');
+      if (el) {
+        setTimeout(() => {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 100);
+      }
+    }
+  }, [search]);
+
+  // Brief highlight on changed calculation value
+  useEffect(() => {
+    setCalcFlash(true);
+    const timer = setTimeout(() => setCalcFlash(false), 900);
+    return () => clearTimeout(timer);
+  }, [draft.baselineValue, draft.observedValue, draft.unit]);
 
   // Auto-save draft to localStorage whenever it changes
   useEffect(() => {
@@ -466,14 +478,14 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
                   <div className="calc-results-row">
                     <div className="calc-result-item">
                       <small>Absolute Difference</small>
-                      <strong className={`calc-val ${benchmarkCalc.isIncrease ? 'text-increase' : benchmarkCalc.isDecrease ? 'text-decrease' : ''}`}>
+                      <strong className={`calc-val ${benchmarkCalc.isIncrease ? 'text-increase' : benchmarkCalc.isDecrease ? 'text-decrease' : ''} ${calcFlash ? 'calc-value-updated' : ''}`}>
                         {benchmarkCalc.absoluteText}
                       </strong>
                     </div>
 
                     <div className="calc-result-item">
                       <small>Relative Change</small>
-                      <strong className={`calc-val ${benchmarkCalc.isIncrease ? 'text-increase' : benchmarkCalc.isDecrease ? 'text-decrease' : ''}`}>
+                      <strong className={`calc-val ${benchmarkCalc.isIncrease ? 'text-increase' : benchmarkCalc.isDecrease ? 'text-decrease' : ''} ${calcFlash ? 'calc-value-updated' : ''}`}>
                         {benchmarkCalc.relativeText}
                       </strong>
                     </div>
@@ -607,9 +619,19 @@ export function AcademicSimulationPage({ currentClaims = [], analyzedTitle = '' 
 
                         <div className="pub-card-action">
                           {isAttached ? (
-                            <span className="attached-status">
+                            <button
+                              type="button"
+                              className="btn btn-attached attached-status"
+                              onClick={() => {
+                                const idx = draft.attachedCitations.findIndex(
+                                  (c) => (c.doi && c.doi === pub.doi) || (c.title && c.title.toLowerCase() === pub.title.toLowerCase())
+                                );
+                                if (idx >= 0) handleRemoveCitation(idx);
+                              }}
+                              title="Attached as candidate citation (click to detach)"
+                            >
                               <Check size={14} /> Attached
-                            </span>
+                            </button>
                           ) : (
                             <button
                               type="button"

@@ -1,32 +1,37 @@
 import React, { useState } from 'react';
 import { 
-  FileSearch, 
   Split, 
   BookOpen, 
   CheckCircle2, 
   AlertTriangle, 
   FileCheck2, 
-  ExternalLink,
-  Layers,
-  ArrowRight,
-  ShieldCheck,
-  Tag
+  ArrowRight, 
+  ShieldCheck, 
+  FileText,
+  Search,
+  Check
 } from 'lucide-react';
+import { Link } from '../router';
 
-const FEATURE_GROUPS = [
+const FEATURE_TABS = [
   {
     id: 'extract-map',
-    groupTitle: 'Extract & Map',
-    subtitle: 'From unstructured prose to addressable claim-citation links',
+    label: 'Extract & map',
+    title: 'Atomic Claim Extraction & Citation Mapping',
+    explanation: 'Extract atomic assertions and link citation markers [1] strictly to bibliographic entries without borrowing neighboring citations.',
+    destinationText: 'Verify a document',
+    destinationLink: '/workspace/verify',
     capabilities: [
-      'Document and atomic claim extraction',
-      'Citation marker detection & multi-ref mapping'
+      'Strict sentence-boundary isolation prevents marker borrowing',
+      'Preserves unverified candidate claims even with missing citations',
+      'Supports numeric [1] and author-year (Smith, 2024) syntax'
     ],
-    renderPreview: () => (
-      <div className="feature-interactive-card">
+    preview: (
+      <div className="feature-interactive-showcase">
         <div className="mini-card-header">
-          <Split size={14} />
+          <Split size={15} />
           <span>Multi-Citation Sentence Parsing</span>
+          <span className="live-demo-tag">Stage 2</span>
         </div>
         <div className="mini-card-content">
           <div className="mini-sentence">
@@ -61,17 +66,22 @@ const FEATURE_GROUPS = [
   },
   {
     id: 'retrieve-compare',
-    groupTitle: 'Retrieve & Compare',
-    subtitle: 'Direct side-by-side passage grounding from designated publications',
+    label: 'Retrieve & compare',
+    title: 'Passage-Level Source Grounding & Comparison',
+    explanation: 'Ground assertions directly against verbatim passages retrieved from OpenAlex, Crossref, and Semantic Scholar.',
+    destinationText: 'Review claim evidence',
+    destinationLink: '/workspace/overview',
     capabilities: [
-      'Original paper retrieval across open providers',
-      'Passage-level semantic & numerical comparison'
+      'BM25 and dense embedding chunk retrieval with section metadata',
+      'Side-by-side numerical and semantic comparison',
+      'Recoverable character offsets and verbatim evidence quotations'
     ],
-    renderPreview: () => (
-      <div className="feature-interactive-card">
+    preview: (
+      <div className="feature-interactive-showcase">
         <div className="mini-card-header">
-          <BookOpen size={14} />
-          <span>Passage-Level Evidence Comparison</span>
+          <BookOpen size={15} />
+          <span>Verbatim Passage Alignment</span>
+          <span className="live-demo-tag">Stage 4</span>
         </div>
         <div className="mini-side-by-side">
           <div className="mini-side-col">
@@ -93,17 +103,22 @@ const FEATURE_GROUPS = [
   },
   {
     id: 'classify-flag',
-    groupTitle: 'Classify & Flag',
-    subtitle: 'Strict polarity, metric, and population disparity classification',
+    label: 'Classify & flag',
+    title: 'Discrepancy & Population Mismatch Detection',
+    explanation: 'Classify claims as Supported or Contradictory, and isolate population mismatches and missing citations.',
+    destinationText: 'Inspect flagged claims',
+    destinationLink: '/workspace/overview',
     capabilities: [
-      'Claim status classification (Supported / Contradictory)',
-      'Misleading reference & population mismatch detection'
+      'Polarity & direction checking (detects false support in negated sentences)',
+      'Population qualifier mismatch detection (adult pilot vs pediatric cohort)',
+      'Deterministic fallback abstains with unable_to_assess when ambiguous'
     ],
-    renderPreview: () => (
-      <div className="feature-interactive-card">
+    preview: (
+      <div className="feature-interactive-showcase">
         <div className="mini-card-header">
-          <AlertTriangle size={14} className="text-warning" />
+          <AlertTriangle size={15} className="text-warning" />
           <span>Population Qualifier Discrepancy</span>
+          <span className="live-demo-tag">Stage 5</span>
         </div>
         <div className="mini-flag-preview">
           <div className="flagged-statement">
@@ -124,22 +139,27 @@ const FEATURE_GROUPS = [
   },
   {
     id: 'trace-report',
-    groupTitle: 'Trace & Report',
-    subtitle: 'Transparent decision audit trails with persistent citation provenance',
+    label: 'Trace & report',
+    title: 'Decision Audit Trails & Exportable Reports',
+    explanation: 'Preserve full provenance from original manuscript offset to publication DOI with exportable CSV and JSON reports.',
+    destinationText: 'View references & audit trail',
+    destinationLink: '/workspace/references',
     capabilities: [
-      'Passage and DOI evidence traceability',
-      'Exportable JSON and CSV audit reports'
+      'Complete DOI and verified URL provenance with zero fabricated links',
+      'Persistent human reviewer audit decisions and notes',
+      'RFC 4180-compliant CSV and structured JSON exports'
     ],
-    renderPreview: () => (
-      <div className="feature-interactive-card">
+    preview: (
+      <div className="feature-interactive-showcase">
         <div className="mini-card-header">
-          <FileCheck2 size={14} />
+          <FileCheck2 size={15} />
           <span>Auditable Verification Report Row</span>
+          <span className="live-demo-tag">Audit Trail</span>
         </div>
         <div className="report-row-preview">
           <div className="row-cell-main">
             <div className="row-meta">
-              <span className="badge supported">Supported</span>
+              <span className="badge supported-badge">Supported</span>
               <span className="doi-tag">DOI: 10.1073/pnas.1319030111</span>
             </div>
             <p className="row-claim-text">Active learning raises student performance in undergraduate STEM.</p>
@@ -155,7 +175,8 @@ const FEATURE_GROUPS = [
 ];
 
 export function Features() {
-  const [activeGroup, setActiveGroup] = useState('extract-map');
+  const [activeTabId, setActiveTabId] = useState('extract-map');
+  const activeTab = FEATURE_TABS.find((t) => t.id === activeTabId) || FEATURE_TABS[0];
 
   return (
     <section id="features" className="features-section" aria-labelledby="features-heading">
@@ -163,53 +184,59 @@ export function Features() {
         <div className="section-header">
           <span className="section-eyebrow">CORE CAPABILITIES</span>
           <h2 id="features-heading" className="section-title">
-            Built for rigorous academic verification
+            Select a task to preview veriCite in action
           </h2>
           <p className="section-subtitle">
-            Every step is designed to make citation verification verifiable, traceable, and inspectable by human researchers.
+            Study how each capability works, review the live interface preview, and open the workspace screen that performs it.
           </p>
         </div>
 
-        <div className="features-grid">
-          {FEATURE_GROUPS.map((fg) => {
-            const isSelected = activeGroup === fg.id;
+        {/* Sitechecker-inspired 4-Tab Feature Explorer */}
+        <div className="feature-explorer-tabs" role="tablist" aria-label="Product feature preview tabs">
+          {FEATURE_TABS.map((tab) => {
+            const isSelected = activeTabId === tab.id;
             return (
-              <div 
-                key={fg.id} 
-                className={`feature-card ${isSelected ? 'active-feature-card' : ''}`}
-                onClick={() => setActiveGroup(fg.id)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    setActiveGroup(fg.id);
-                  }
-                }}
-                aria-pressed={isSelected}
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={isSelected}
+                className={`explorer-tab-btn ${isSelected ? 'active' : ''}`}
+                onClick={() => setActiveTabId(tab.id)}
               >
-                <div className="feature-card-content">
-                  <div className="feature-card-heading">
-                    <h3>{fg.groupTitle}</h3>
-                    <p className="feature-card-desc">{fg.subtitle}</p>
-                  </div>
-
-                  <ul className="capabilities-list">
-                    {fg.capabilities.map((cap) => (
-                      <li key={cap}>
-                        <ShieldCheck size={14} className="cap-icon" />
-                        <span>{cap}</span>
-                      </li>
-                    ))}
-                  </ul>
-
-                  <div className="feature-preview-box">
-                    {fg.renderPreview()}
-                  </div>
-                </div>
-              </div>
+                <span>{tab.label}</span>
+              </button>
             );
           })}
+        </div>
+
+        {/* Feature Explorer Showcase: Explanation + Destination CTA + Interactive Preview */}
+        <div className="feature-showcase-panel" role="tabpanel" aria-live="polite">
+          <div className="showcase-content">
+            <span className="showcase-badge">{activeTab.label}</span>
+            <h3 className="showcase-title">{activeTab.title}</h3>
+            <p className="showcase-explanation">{activeTab.explanation}</p>
+
+            <ul className="showcase-bullets">
+              {activeTab.capabilities.map((cap) => (
+                <li key={cap}>
+                  <Check size={16} className="cap-check-icon" />
+                  <span>{cap}</span>
+                </li>
+              ))}
+            </ul>
+
+            <div className="showcase-action">
+              <Link href={activeTab.destinationLink} className="btn btn-primary showcase-cta">
+                <span>{activeTab.destinationText}</span>
+                <ArrowRight size={15} />
+              </Link>
+            </div>
+          </div>
+
+          <div className="showcase-preview-wrapper">
+            {activeTab.preview}
+          </div>
         </div>
       </div>
     </section>

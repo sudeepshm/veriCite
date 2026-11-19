@@ -29,7 +29,7 @@ function restore() {
 }
 
 function RootApp() {
-  const { path } = useRouter();
+  const { pathname } = useRouter();
   const [state, setState] = useState(restore);
   const [backendOnline, setBackendOnline] = useState(false);
 
@@ -50,7 +50,7 @@ function RootApp() {
   // Route matching:
   // "/" => Public Homepage
   // "/workspace*" => Verification & Simulation Workspace
-  if (path === '/' || path === '') {
+  if (pathname === '/' || pathname === '') {
     return <HomePage />;
   }
 

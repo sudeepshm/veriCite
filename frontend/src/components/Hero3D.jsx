@@ -5,60 +5,64 @@ import {
   Play, 
   Pause, 
   RotateCcw, 
+  ChevronLeft, 
+  ChevronRight,
   FileText, 
   BookOpen, 
   AlertTriangle, 
   Check, 
   Calculator,
-  Eye,
-  ChevronRight
+  Info
 } from 'lucide-react';
 import { Link } from '../router';
 
-const STAGES = [
+const MOMENTS = [
   {
-    num: 1,
-    title: 'Claim in Manuscript',
-    summary: 'Identify the atomic assertion and the specific citation marker.',
+    moment: 1,
+    timeRange: '0–2s',
+    label: 'Identify Assertion',
+    learning: 'The engine identifies a specific assertion and its citation.'
   },
   {
-    num: 2,
-    title: 'Citation Linked',
-    summary: 'Map the marker [1] to its exact bibliography publication.',
+    moment: 2,
+    timeRange: '2–4s',
+    label: 'Extract Source Evidence',
+    learning: 'The comparison uses values from the cited source.'
   },
   {
-    num: 3,
-    title: 'Source Paper Retrieved',
-    summary: 'Inspect the Results section and extracted baseline/follow-up table.',
-  },
-  {
-    num: 4,
-    title: 'Discrepancy Calculated',
-    summary: 'Extract exact figures and calculate the actual effect size: 60% - 50% = 10 pp.',
-  },
-  {
-    num: 5,
-    title: 'Side-by-Side Verdict',
-    summary: 'Flag the quantitative conflict: claimed 20 percentage points vs actual 10 percentage points.',
-  },
+    moment: 3,
+    timeRange: '4–6s',
+    label: 'Compare Discrepancy',
+    learning: 'The visitor can see and check the discrepancy without trusting a badge.'
+  }
 ];
 
 export function Hero3D() {
-  const [stage, setStage] = useState(1);
+  const [moment, setMoment] = useState(1);
   const [isPlaying, setIsPlaying] = useState(true);
   const [isReducedMotion, setIsReducedMotion] = useState(false);
   const timerRef = useRef(null);
 
-  // Detect user prefers-reduced-motion preference
+  // Check prefers-reduced-motion
   useEffect(() => {
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    setIsReducedMotion(mq.matches);
-    const handler = (e) => setIsReducedMotion(e.matches);
+    if (mq.matches) {
+      setIsReducedMotion(true);
+      setMoment(3); // start at settled final state
+      setIsPlaying(false);
+    }
+    const handler = (e) => {
+      setIsReducedMotion(e.matches);
+      if (e.matches) {
+        setMoment(3);
+        setIsPlaying(false);
+      }
+    };
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
   }, []);
 
-  // Autoplay ticker when not paused and not reduced motion
+  // Autoplay: 0-2s (Moment 1) -> 2-4s (Moment 2) -> 4-6s (Moment 3), then hold!
   useEffect(() => {
     if (!isPlaying || isReducedMotion) {
       clearInterval(timerRef.current);
@@ -66,24 +70,47 @@ export function Hero3D() {
     }
 
     timerRef.current = setInterval(() => {
-      setStage((prev) => (prev < 5 ? prev + 1 : 1));
-    }, 4200);
+      setMoment((prev) => {
+        if (prev < 3) {
+          return prev + 1;
+        } else {
+          // Play once, then hold the result
+          setIsPlaying(false);
+          clearInterval(timerRef.current);
+          return 3;
+        }
+      });
+    }, 2000); // 2000ms per moment = 6 seconds total
 
     return () => clearInterval(timerRef.current);
   }, [isPlaying, isReducedMotion]);
 
-  const handleStageSelect = (s) => {
-    setStage(s);
-    setIsPlaying(false); // pause autoplay on user direct interaction
+  const goToMoment = (m) => {
+    setMoment(m);
+    setIsPlaying(false); // hold on manual click
+  };
+
+  const handleNext = () => {
+    if (moment < 3) {
+      setMoment(moment + 1);
+      setIsPlaying(false);
+    }
+  };
+
+  const handlePrev = () => {
+    if (moment > 1) {
+      setMoment(moment - 1);
+      setIsPlaying(false);
+    }
+  };
+
+  const handleReplay = () => {
+    setMoment(1);
+    setIsPlaying(true);
   };
 
   const togglePlay = () => {
     setIsPlaying(!isPlaying);
-  };
-
-  const handleReplay = () => {
-    setStage(1);
-    setIsPlaying(true);
   };
 
   return (
@@ -93,15 +120,15 @@ export function Hero3D() {
         <div className="hero-copy">
           <div className="hero-badge">
             <span className="badge-pulse" />
-            Traceable Citation Verification
+            TRACEABLE CITATION VERIFICATION
           </div>
 
           <h1 id="hero-title" className="hero-headline">
-            See what your citations <span className="highlight-text">actually support.</span>
+            Does your source support your claim?
           </h1>
 
           <p className="hero-description">
-            Trace a manuscript claim to its cited paper, inspect the original passage, and review the evidence side by side.
+            Follow a statement from your manuscript to the exact passage in the cited paper.
           </p>
 
           <div className="hero-actions">
@@ -128,241 +155,210 @@ export function Hero3D() {
           </div>
         </div>
 
-        {/* Right Column: 3D Interactive Demonstration */}
+        {/* Right Column: 3D Interactive Paper Stack */}
         <div className="hero-demo-wrapper">
           <div className="hero-demo-header">
             <div className="demo-tag">
               <span className="demo-tag-dot" />
-              Illustrative example · Fictional demonstration
+              Illustrative example
             </div>
-            
+
+            {/* Playback Controls: Previous, Play/Pause, Next, Replay */}
             <div className="demo-controls" aria-label="Demonstration playback controls">
               <button
                 type="button"
                 className="control-icon-btn"
+                onClick={handlePrev}
+                disabled={moment <= 1}
+                aria-label="Previous step"
+                title="Previous step"
+              >
+                <ChevronLeft size={16} />
+              </button>
+
+              <button
+                type="button"
+                className="control-icon-btn"
                 onClick={togglePlay}
-                aria-label={isPlaying ? 'Pause demonstration animation' : 'Play demonstration animation'}
+                aria-label={isPlaying ? 'Pause animation' : 'Play animation'}
                 title={isPlaying ? 'Pause' : 'Play'}
               >
-                {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+                {isPlaying ? <Pause size={15} /> : <Play size={15} />}
               </button>
+
+              <button
+                type="button"
+                className="control-icon-btn"
+                onClick={handleNext}
+                disabled={moment >= 3}
+                aria-label="Next step"
+                title="Next step"
+              >
+                <ChevronRight size={16} />
+              </button>
+
               <button
                 type="button"
                 className="control-icon-btn"
                 onClick={handleReplay}
-                aria-label="Replay demonstration from step 1"
-                title="Restart"
+                aria-label="Replay animation from beginning"
+                title="Replay demonstration"
               >
-                <RotateCcw size={14} />
+                <RotateCcw size={15} />
               </button>
             </div>
           </div>
 
-          {/* Stepper Pills */}
-          <div className="demo-stepper" role="tablist" aria-label="Demonstration steps">
-            {STAGES.map((s) => (
+          {/* Moment Navigation Stepper */}
+          <div className="demo-stepper" role="tablist" aria-label="Demonstration moments">
+            {MOMENTS.map((m) => (
               <button
-                key={s.num}
+                key={m.moment}
+                type="button"
                 role="tab"
-                aria-selected={stage === s.num}
-                className={`step-pill ${stage === s.num ? 'active' : ''} ${stage > s.num ? 'completed' : ''}`}
-                onClick={() => handleStageSelect(s.num)}
+                aria-selected={moment === m.moment}
+                className={`step-pill ${moment === m.moment ? 'active' : ''} ${m.moment < moment ? 'completed' : ''}`}
+                onClick={() => goToMoment(m.moment)}
               >
-                <span className="step-num">{s.num}</span>
-                <span className="step-label">{s.title}</span>
+                <span className="step-num">{m.moment}</span>
+                <span className="step-label">{m.label} ({m.timeRange})</span>
               </button>
             ))}
           </div>
 
           {/* 3D Scene Viewport */}
           <div 
-            className={`scene-viewport ${isReducedMotion ? 'reduced-motion-mode' : ''}`}
+            className={`scene-viewport moment-${moment} ${isReducedMotion ? 'reduced-motion' : ''}`}
             aria-live="polite"
           >
-            {/* If prefers-reduced-motion is active, display static side-by-side comparison */}
-            {isReducedMotion ? (
-              <div className="static-comparison-card">
-                <div className="static-col">
-                  <div className="scene-card-header manuscript-header">
-                    <FileText size={15} />
-                    <span>Submitted Manuscript (p. 4)</span>
-                  </div>
-                  <div className="scene-card-body">
-                    <div className="claim-highlight">
-                      “Accuracy improved by <mark className="stat-discrepancy">20 percentage points</mark> <span className="cite-marker">[1]</span>.”
-                    </div>
-                    <div className="bib-snippet">
-                      <strong>References</strong>
-                      <p>[1] Rao, M. (2025). Classification accuracy in an adult pilot. <em>Fixture Studies</em>, 1, 1.</p>
-                    </div>
-                  </div>
+            {/* 3D Paper Stack Scene */}
+            <div className={`stage-scene moment-active-${moment}`}>
+              {/* Paper 1: Draft Manuscript */}
+              <div className={`scene-card manuscript-card ${moment >= 1 ? 'visible' : ''} ${moment === 3 ? 'settled-left' : ''}`}>
+                <div className="scene-card-header manuscript-header">
+                  <FileText size={15} />
+                  <span>Draft Manuscript (p. 4)</span>
+                  <span className="card-stage-indicator">Claim</span>
                 </div>
+                
+                <div className="scene-card-body">
+                  <p className="context-text">
+                    Across the adult cohort evaluation, the model demonstrated significant accuracy gains:
+                  </p>
+                  
+                  <div className={`claim-highlight-box ${moment >= 1 ? 'highlighted' : ''}`}>
+                    “Accuracy improved by{' '}
+                    <span className="claim-num-lime">20 percentage points</span>{' '}
+                    <span className={`marker-pill ${moment >= 1 ? 'marker-connected' : ''}`}>[1]</span>.”
+                    {/* Animated connector traveling from assertion to [1] */}
+                    <span className={`lime-connector-line ${moment >= 1 ? 'active' : ''}`} />
+                  </div>
 
-                <div className="static-col">
-                  <div className="scene-card-header source-header">
-                    <BookOpen size={15} />
-                    <span>Cited Publication: Rao (2025) Table 2</span>
-                  </div>
-                  <div className="scene-card-body">
-                    <table className="demo-table">
-                      <thead>
-                        <tr>
-                          <th>Measurement</th>
-                          <th>Score</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr>
-                          <td>Baseline Accuracy</td>
-                          <td className="metric-val">50%</td>
-                        </tr>
-                        <tr className="highlight-row">
-                          <td>Follow-up Accuracy</td>
-                          <td className="metric-val">60%</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                    <div className="calc-pill">
-                      <Calculator size={14} />
-                      <span>60% − 50% = <strong>10 percentage points</strong></span>
-                    </div>
-                    <div className="static-verdict">
-                      <span className="badge contradictory">
-                        <AlertTriangle size={13} /> Contradictory
-                      </span>
-                      <p>Claim asserts 20 percentage points; cited paper records 10 percentage points.</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* Perspective 3D Stage View */
-              <div className={`stage-scene stage-active-${stage}`}>
-                {/* 1. Manuscript Layer */}
-                <div className={`scene-card manuscript-card ${stage >= 1 ? 'visible' : ''} ${stage >= 5 ? 'settled-left' : ''}`}>
-                  <div className="scene-card-header manuscript-header">
-                    <FileText size={15} />
-                    <span>Draft Manuscript · Findings</span>
-                    <span className="card-stage-indicator">Step 1</span>
-                  </div>
-                  <div className="scene-card-body">
-                    <p className="context-text">
-                      Across the cohort evaluation, our primary model demonstrated significant convergence.
+                  <div className="bib-section-mini">
+                    <span className="bib-label">BIBLIOGRAPHY ENTRY</span>
+                    <p className="bib-text">
+                      <strong>[1] Rao, M. (2025).</strong> Classification accuracy in an adult pilot. <em>Fixture Studies</em>, 1, 1.
                     </p>
-                    <div className={`claim-highlight-box ${stage >= 1 ? 'highlighted' : ''}`}>
-                      “Accuracy improved by <span className="claim-num">20 percentage points</span>{' '}
-                      <span className={`marker-pill ${stage >= 2 ? 'marker-connected' : ''}`}>[1]</span>.”
-                    </div>
-                    
-                    {/* Bibliography anchor */}
-                    <div className={`bib-section ${stage >= 2 ? 'bib-revealed' : ''}`}>
-                      <div className="bib-title">BIBLIOGRAPHY ENTRY</div>
-                      <div className="bib-entry">
-                        <span className="marker-tag">[1]</span>
-                        <div className="bib-details">
-                          <strong>Rao, M. (2025)</strong>
-                          <p>Classification accuracy in an adult pilot. <em>Fixture Studies</em>, 1, 1.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Visual Connector Line (Appears in Stage 2) */}
-                {stage === 2 && (
-                  <div className="connection-tracer" aria-hidden="true">
-                    <div className="trace-path" />
-                    <span className="trace-badge">Resolving source DOI via Crossref…</span>
-                  </div>
-                )}
-
-                {/* 3. Cited Source Paper Layer */}
-                <div className={`scene-card source-card ${stage >= 3 ? 'visible' : ''} ${stage === 3 ? 'popped-forward' : ''} ${stage >= 5 ? 'settled-right' : ''}`}>
-                  <div className="scene-card-header source-header">
-                    <BookOpen size={15} />
-                    <span>Cited Paper · Rao et al. (2025)</span>
-                    <span className="card-stage-indicator">Step 3: Evidence</span>
-                  </div>
-                  <div className="scene-card-body">
-                    <div className="section-title">SECTION 4: RESULTS TABLE 2</div>
-                    <table className="demo-table">
-                      <thead>
-                        <tr>
-                          <th>Evaluation Point</th>
-                          <th>Reported Accuracy</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr className={stage >= 4 ? 'row-selected' : ''}>
-                          <td>Baseline trial (n=40)</td>
-                          <td className="num-cell">50%</td>
-                        </tr>
-                        <tr className={stage >= 4 ? 'row-selected' : ''}>
-                          <td>Adult pilot follow-up</td>
-                          <td className="num-cell highlight-cell">60%</td>
-                        </tr>
-                      </tbody>
-                    </table>
-
-                    {/* Stage 4: Calculation callout */}
-                    {stage >= 4 && (
-                      <div className="calculation-callout">
-                        <div className="calc-header">
-                          <Calculator size={14} />
-                          <span>Exact Quantitative Computation</span>
-                        </div>
-                        <div className="calc-formula">
-                          <code>60% − 50% = 10 percentage points</code>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Stage 5: Final Verdict Summary */}
-                    {stage === 5 && (
-                      <div className="final-verdict-banner">
-                        <div className="verdict-header">
-                          <span className="badge contradictory">
-                            <AlertTriangle size={13} />
-                            Contradictory
-                          </span>
-                          <span className="verdict-rule-tag">Strict Numerical Comparator</span>
-                        </div>
-                        <p className="verdict-explanation">
-                          Discrepancy detected: The manuscript asserts a <strong>20 percentage point</strong> gain, but the cited paper confirms an absolute gain of <strong>10 percentage points</strong> (50% → 60%).
-                        </p>
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
-            )}
+
+              {/* Paper 2: Cited Publication (Slides forward behind manuscript in Moment 2, settles side by side in Moment 3) */}
+              <div className={`scene-card source-card ${moment >= 2 ? 'visible' : ''} ${moment === 3 ? 'settled-right' : ''}`}>
+                <div className="scene-card-header source-header">
+                  <BookOpen size={15} />
+                  <span>Cited Publication · Rao (2025)</span>
+                  <span className="card-stage-indicator source-indicator">Source Evidence</span>
+                </div>
+
+                <div className="scene-card-body">
+                  <div className="table-caption">Table 2: Adult Pilot Classification Performance</div>
+                  <table className="demo-table">
+                    <thead>
+                      <tr>
+                        <th>Measurement Group</th>
+                        <th>Score</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className={moment >= 2 ? 'row-selected' : ''}>
+                        <td>Baseline Accuracy</td>
+                        <td className="num-cell highlight-cell">50%</td>
+                      </tr>
+                      <tr className={moment >= 2 ? 'row-selected' : ''}>
+                        <td>Follow-up Accuracy</td>
+                        <td className="num-cell highlight-cell">60%</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Arithmetic extraction callout */}
+                  <div className="calculation-callout">
+                    <div className="calc-header">
+                      <Calculator size={13} />
+                      <span>Quantitative Grounding</span>
+                    </div>
+                    <div className="calc-formula">
+                      <code>60% − 50% = <strong>10 percentage points</strong></code>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
-          {/* Bottom Stage Narrative Explanation */}
-          <div className="demo-narrative-bar">
-            <div className="narrative-step">
-              <span className="step-indicator">Stage {stage} of 5</span>
-              <strong>{STAGES[stage - 1].title}:</strong> {STAGES[stage - 1].summary}
+          {/* Moment 3 Revealed Comparison Bar */}
+          <div className={`discrepancy-settlement-bar ${moment === 3 ? 'revealed' : ''}`}>
+            <div className="settlement-values">
+              <div className="val-box claim-val">
+                <span className="val-label">Manuscript Claim</span>
+                <strong>+20 percentage points</strong>
+              </div>
+              <span className="vs-divider">≠</span>
+              <div className="val-box source-val">
+                <span className="val-label">Cited Paper (Rao 2025)</span>
+                <strong>+10 percentage points</strong>
+              </div>
             </div>
-            {stage < 5 ? (
-              <button
-                type="button"
-                className="narrative-next-btn"
-                onClick={() => handleStageSelect(stage + 1)}
-              >
-                Next step
-                <ChevronRight size={14} />
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="narrative-next-btn restart"
-                onClick={handleReplay}
-              >
-                Replay demonstration
-                <RotateCcw size={14} />
-              </button>
-            )}
+            <div className="settlement-verdict">
+              <span className="badge contradictory-badge">
+                <AlertTriangle size={13} />
+                Contradictory
+              </span>
+              <span className="discrepancy-note">
+                10-point discrepancy verified directly against Table 2.
+              </span>
+            </div>
+          </div>
+
+          {/* Bottom Narrative / Learning Bar */}
+          <div className="demo-narrative-bar">
+            <div className="narrative-learning">
+              <span className="learning-tag">MOMENT {moment} OF 3</span>
+              <span className="learning-text">{MOMENTS[moment - 1].learning}</span>
+            </div>
+
+            <div className="narrative-action">
+              {moment < 3 ? (
+                <button
+                  type="button"
+                  className="narrative-next-btn"
+                  onClick={handleNext}
+                >
+                  <span>Next moment</span>
+                  <ChevronRight size={14} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="narrative-replay-btn"
+                  onClick={handleReplay}
+                >
+                  <RotateCcw size={13} />
+                  <span>Replay demonstration</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

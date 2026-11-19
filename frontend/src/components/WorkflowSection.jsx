@@ -7,9 +7,7 @@ import {
   ShieldCheck, 
   ArrowRight,
   Cpu,
-  Database,
-  CheckCircle2,
-  AlertCircle
+  CheckCircle2
 } from 'lucide-react';
 
 const STAGES = [
@@ -17,12 +15,16 @@ const STAGES = [
     id: 1,
     name: 'Parse',
     badge: 'Stage 1',
-    inputDesc: 'Manuscript document (.txt, .md supported; PDF / DOCX planned via Docling)',
+    inputDesc: 'Manuscript document (.txt and .md supported; PDF / DOCX planned via Docling)',
     technology: 'Regex paragraph/heading boundaries & sentence-span tokenizer',
     outputDesc: 'Structured text, heading, and bibliography blocks with character offsets',
     icon: FileText,
     exampleInput: 'Accuracy rose from 50% to 60% in the adult pilot [1].',
-    exampleOutput: 'DocumentBlock(block_id="b0002", type=text, char_start=45, char_end=102)'
+    exampleOutput: 'DocumentBlock(block_id="b0002", type=text, char_start=45, char_end=102)',
+    formats: [
+      { label: '.txt & .md', status: 'active', desc: 'Supported' },
+      { label: 'PDF & DOCX', status: 'planned', desc: 'Planned via Docling' }
+    ]
   },
   {
     id: 2,
@@ -33,18 +35,24 @@ const STAGES = [
     outputDesc: 'Atomic claims strictly linked to cited reference IDs; unmatched markers isolated',
     icon: Split,
     exampleInput: 'Sentence: "Accuracy rose... [1]" + Ref: "[1] Rao, M. (2025)..."',
-    exampleOutput: 'Claim(claim_id="c_01") mapped to ClaimReferenceLink(ref_id="r_01", marker="[1]")'
+    exampleOutput: 'Claim(claim_id="c_01") mapped to ClaimReferenceLink(ref_id="r_01", marker="[1]")',
+    providers: []
   },
   {
     id: 3,
     name: 'Resolve',
     badge: 'Stage 3',
     inputDesc: 'Raw bibliographic entries, titles, and DOIs',
-    technology: 'Primary OpenAlex & Crossref metadata lookup; Semantic Scholar fallback',
+    technology: 'OpenAlex & Crossref primary metadata lookup with Semantic Scholar fallback',
     outputDesc: 'ResolvedSource with verified DOI, publication identity, and open-access PDF/URL',
     icon: Globe,
     exampleInput: 'Rao, M. (2025). Classification accuracy in an adult pilot.',
-    exampleOutput: 'ResolvedSource(doi="10.1073/pnas.1319030111", coverage="full_text", is_oa=True)'
+    exampleOutput: 'ResolvedSource(doi="10.1073/pnas.1319030111", coverage="full_text", is_oa=True)',
+    providers: [
+      { name: 'OpenAlex', role: 'primary', label: 'Primary Registry' },
+      { name: 'Crossref', role: 'primary', label: 'Primary DOI Resolver' },
+      { name: 'Semantic Scholar', role: 'fallback', label: 'Fallback Registry' }
+    ]
   },
   {
     id: 4,
@@ -55,18 +63,20 @@ const STAGES = [
     outputDesc: 'Top relevant verbatim passages with section metadata and recoverable locations',
     icon: Search,
     exampleInput: 'Claim: "Accuracy rose from 50% to 60%" vs. Paper Text',
-    exampleOutput: 'Passage(passage_id="p_401", section="Results Table 2", verbatim="...rose from 50% to 60%...")'
+    exampleOutput: 'Passage(passage_id="p_401", section="Results Table 2", verbatim="...rose from 50% to 60%...")',
+    providers: []
   },
   {
     id: 5,
     name: 'Assess',
     badge: 'Stage 5',
     inputDesc: 'Atomic claim + target source passages + validation metadata',
-    technology: 'Gemini classification or strict deterministic numerical comparator (polarity/metric/population matching)',
+    technology: 'Deterministic numerical comparator (polarity/metric/population matching) & Gemini classification',
     outputDesc: 'Assessment verdict (Supported, Contradictory, or Unable to assess) with explanation & evidence IDs',
     icon: ShieldCheck,
     exampleInput: 'Claim assertion vs. Retrieved candidate passages',
-    exampleOutput: 'Assessment(verdict=SUPPORTED, evidence_ids=["p_401"], confidence=0.90)'
+    exampleOutput: 'Assessment(verdict=SUPPORTED, evidence_ids=["p_401"], confidence=0.90)',
+    providers: []
   }
 ];
 
@@ -88,32 +98,31 @@ export function WorkflowSection() {
           </p>
         </div>
 
-        {/* Stage selection tabs */}
-        <div className="pipeline-track" role="tablist" aria-label="Pipeline stages">
+        {/* Pipeline Stages Track with Animated Connector */}
+        <div className="pipeline-track" role="tablist" aria-label="Pipeline workflow stages">
           {STAGES.map((s, idx) => {
-            const Icon = s.icon;
             const isSelected = activeStage === s.id;
-            const isPast = activeStage > s.id;
+            const Icon = s.icon;
             return (
               <React.Fragment key={s.id}>
                 <button
                   type="button"
                   role="tab"
                   aria-selected={isSelected}
-                  className={`pipeline-node ${isSelected ? 'selected' : ''} ${isPast ? 'past' : ''}`}
+                  className={`pipeline-node ${isSelected ? 'active-node' : ''}`}
                   onClick={() => setActiveStage(s.id)}
                 >
-                  <div className="node-icon-wrapper">
-                    <Icon size={18} />
+                  <div className="node-icon-circle">
+                    <Icon size={17} />
                   </div>
-                  <div className="node-info">
-                    <span className="node-badge">{s.badge}</span>
+                  <div className="node-text">
+                    <span className="node-badge">Stage {s.id}</span>
                     <strong className="node-name">{s.name}</strong>
                   </div>
                 </button>
                 {idx < STAGES.length - 1 && (
-                  <div className={`pipeline-connector ${activeStage > s.id ? 'connector-active' : ''}`} aria-hidden="true">
-                    <span className="connector-dot" />
+                  <div className={`pipeline-connector ${activeStage > s.id ? 'passed' : activeStage === s.id ? 'active-flow' : ''}`} aria-hidden="true">
+                    <div className="connector-flow-dot" />
                   </div>
                 )}
               </React.Fragment>
@@ -133,6 +142,35 @@ export function WorkflowSection() {
               <span>{current.technology}</span>
             </div>
           </div>
+
+          {/* Special Stage 1 Format Callout */}
+          {current.formats && (
+            <div className="format-support-bar">
+              <span className="format-heading">Document formats:</span>
+              <div className="format-tags">
+                {current.formats.map((f) => (
+                  <span key={f.label} className={`format-tag ${f.status}`}>
+                    <strong>{f.label}</strong> — {f.desc}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Special Stage 3 Provider Callout */}
+          {current.providers && current.providers.length > 0 && (
+            <div className="provider-registry-callout">
+              <span className="registry-title">Academic Provider Registry:</span>
+              <div className="provider-badges">
+                {current.providers.map((p) => (
+                  <span key={p.name} className={`provider-chip ${p.role}`}>
+                    <span className="chip-role">{p.label}</span>
+                    <strong>{p.name}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="stage-io-grid">
             <div className="io-card io-input">
@@ -157,7 +195,7 @@ export function WorkflowSection() {
           </div>
 
           <div className="stage-guarantee-note">
-            <CheckCircle2 size={15} className="text-success" />
+            <CheckCircle2 size={16} className="text-success" />
             <span>
               <strong>Contract guarantee:</strong> A missing source, network timeout, or provider failure never fabricates a negative verdict. If evidence cannot be retrieved, the pipeline abstains with <code>unable_to_assess</code>.
             </span>

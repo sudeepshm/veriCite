@@ -506,7 +506,7 @@ export function WorkspacePage({ state, setState, backendOnline }) {
   };
 
   const sidebarLinks = [
-    { id: 'Document', label: 'Verify document', icon: FileText, route: '/workspace/verify' },
+    { id: 'Document', label: 'Verify a document', icon: FileText, route: '/workspace/verify' },
     { id: 'Simulation', label: 'Academic Simulation', icon: FlaskConical, route: '/workspace/simulation' },
     { id: 'Overview', label: 'Overview', icon: LayoutDashboard, route: '/workspace/overview', count: state.claims.length },
     { id: 'Paper chat', label: 'Paper chat', icon: MessageSquare, route: '/workspace/chat' },
@@ -882,7 +882,20 @@ export function WorkspacePage({ state, setState, backendOnline }) {
                     </button>
                   ))}
 
-                  {!visible.length && (
+                  {!state.claims.length ? (
+                    <div className="panel empty">
+                      <FileText size={36} />
+                      <h3>No manuscript loaded yet</h3>
+                      <p>Upload or paste your academic text with citations to begin verification.</p>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => handleTabClick('Document')}
+                      >
+                        <Upload size={16} /> Verify a document
+                      </button>
+                    </div>
+                  ) : !visible.length ? (
                     <div className="panel empty">
                       <Search />
                       <h3>No matching claims</h3>
@@ -897,7 +910,7 @@ export function WorkspacePage({ state, setState, backendOnline }) {
                         Clear filters
                       </button>
                     </div>
-                  )}
+                  ) : null}
                 </section>
 
                 {row && visible.length > 0 && (

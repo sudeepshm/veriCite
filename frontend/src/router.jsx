@@ -2,38 +2,43 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 const RouterContext = createContext({
   path: '/',
+  pathname: '/',
+  search: '',
   navigate: () => {},
 });
 
 export function RouterProvider({ children }) {
-  const [path, setPath] = useState(() => {
+  const [currentUrl, setCurrentUrl] = useState(() => {
     if (typeof window !== 'undefined') {
-      return window.location.pathname || '/';
+      return (window.location.pathname || '/') + (window.location.search || '');
     }
     return '/';
   });
 
   useEffect(() => {
     const onPopState = () => {
-      setPath(window.location.pathname || '/');
+      setCurrentUrl((window.location.pathname || '/') + (window.location.search || ''));
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   const navigate = useCallback((to, replace = false) => {
-    if (to === window.location.pathname) return;
+    const current = (window.location.pathname || '/') + (window.location.search || '');
+    if (to === current) return;
     if (replace) {
       window.history.replaceState({}, '', to);
     } else {
       window.history.pushState({}, '', to);
     }
-    setPath(to);
+    setCurrentUrl(to);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
+  const [pathname, search] = currentUrl.split('?');
+
   return (
-    <RouterContext.Provider value={{ path, navigate }}>
+    <RouterContext.Provider value={{ path: currentUrl, pathname: pathname || '/', search: search ? `?${search}` : '', navigate }}>
       {children}
     </RouterContext.Provider>
   );
