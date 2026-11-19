@@ -266,6 +266,55 @@ References
         self.assertEqual(asm5.assessment_status, AssessmentStatus.unable_to_assess, "Ambiguous association must return unable_to_assess")
         self.assertIsNone(asm5.semantic_verdict)
 
+    async def test_p0_polarity_and_direction_negation_abstains_never_supported(self):
+        """P0 Regression: Neither negated findings nor opposing polarity should ever return SUPPORTED."""
+        source = ResolvedSource(
+            source_id="src_test",
+            ref_id="ref_test",
+            identity_status=IdentityStatus.matched,
+            coverage=CoverageStatus.full_text,
+        )
+
+        # Case 1: "Accuracy rose from 50% to 60% in the adult pilot" against "In the adult pilot, accuracy did not rise from 50% to 60%."
+        claim_rose = Claim(
+            claim_id="c_rose",
+            document_id="doc1",
+            block_id="b1",
+            original_span="Accuracy rose from 50% to 60% in the adult pilot [1].",
+            normalized_text="Accuracy rose from 50% to 60% in the adult pilot [1].",
+        )
+        pass_did_not_rise = [
+            Passage(
+                passage_id="p_neg1",
+                source_id="src_test",
+                verbatim_text="In the adult pilot, accuracy did not rise from 50% to 60%.",
+                section="Results",
+            )
+        ]
+        asm_neg1 = await assess_claim_reference_pair(claim_rose, source, pass_did_not_rise)
+        self.assertNotEqual(asm_neg1.semantic_verdict, SemanticVerdict.SUPPORTED, "Must NEVER return SUPPORTED on negated finding")
+        self.assertEqual(asm_neg1.assessment_status, AssessmentStatus.unable_to_assess)
+
+        # Case 2: Claim of 10-point gain against source saying gain was NOT 10 percentage points
+        claim_10pp = Claim(
+            claim_id="c_10pp",
+            document_id="doc1",
+            block_id="b1",
+            original_span="The absolute accuracy gain was 10 percentage points in the adult pilot [1].",
+            normalized_text="The absolute accuracy gain was 10 percentage points in the adult pilot [1].",
+        )
+        pass_not_10pp = [
+            Passage(
+                passage_id="p_neg2",
+                source_id="src_test",
+                verbatim_text="In the adult pilot, the absolute accuracy gain was not 10 percentage points.",
+                section="Results",
+            )
+        ]
+        asm_neg2 = await assess_claim_reference_pair(claim_10pp, source, pass_not_10pp)
+        self.assertNotEqual(asm_neg2.semantic_verdict, SemanticVerdict.SUPPORTED, "Must NEVER return SUPPORTED when source says gain was not 10 pp")
+        self.assertEqual(asm_neg2.assessment_status, AssessmentStatus.unable_to_assess)
+
     async def test_flaw3_stage5_check_rejects_assessed_without_valid_evidence_passages(self):
         """Stage 5 check: Require at least one validated passage from designated source before returning assessed."""
         source = ResolvedSource(

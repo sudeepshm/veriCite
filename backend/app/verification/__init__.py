@@ -21,6 +21,33 @@ from app.config import GEMINI_API_KEY
 logger = logging.getLogger(__name__)
 
 
+def _has_negation(text: str) -> bool:
+    """Check if *text* contains explicit negation markers."""
+    t = text.lower()
+    neg_patterns = [
+        r"\b(?:not|no|never|neither|nor|without|hardly|scarcely|cannot|can't)\b",
+        r"\b(?:did|does|do|was|were|is|are|has|have|had)n['’]?t\b",
+        r"\b(?:did|does|do|was|were|is|are|has|have|had)\s+not\b",
+        r"\bfail(?:ed|s|ing)?\s+to\b",
+    ]
+    return any(re.search(pat, t) for pat in neg_patterns)
+
+
+_INCREASE_WORDS = {"rose", "increased", "increase", "gain", "gained", "grew", "growth", "higher", "improved"}
+_DECREASE_WORDS = {"fell", "decreased", "decrease", "dropped", "drop", "declined", "decline", "lower", "reduced", "reduction", "loss"}
+
+
+def _get_direction(text: str) -> str | None:
+    words = set(re.findall(r"\b[a-z]+\b", text.lower()))
+    has_inc = bool(words & _INCREASE_WORDS)
+    has_dec = bool(words & _DECREASE_WORDS)
+    if has_inc and not has_dec:
+        return "increase"
+    if has_dec and not has_inc:
+        return "decrease"
+    return None
+
+
 def _extract_metric_quantity(text: str, unit: str) -> float | None:
     """Extract the specific numeric value that binds directly to *unit*.
 
@@ -209,6 +236,10 @@ async def assess_claim_reference_pair(
                 continue
 
             if claim_unit == "percentage points" and "percentage points" in p_lower:
+                # Check polarity: if polarities conflict (e.g. "not 10 percentage points"), abstain from support
+                if _has_negation(c_lower) != _has_negation(p_lower):
+                    continue
+
                 claim_val = _extract_metric_quantity(c_lower, claim_unit)
                 passage_val = _extract_metric_quantity(p_lower, claim_unit)
                 if claim_val is not None and passage_val is not None:
@@ -244,6 +275,15 @@ async def assess_claim_reference_pair(
             rise_match_claim = re.search(r"(\d+)%?\s*(?:to|rose from \d+%\s*to)\s*(\d+)%?", c_lower)
             rise_match_pass = re.search(r"(\d+)%?\s*(?:to|rose from \d+%\s*to)\s*(\d+)%?", p_lower)
             if rise_match_claim and rise_match_pass:
+                # Check polarity and direction
+                if _has_negation(c_lower) != _has_negation(p_lower):
+                    continue  # Opposing polarity; cannot establish polarity, abstain
+
+                claim_dir = _get_direction(c_lower)
+                pass_dir = _get_direction(p_lower)
+                if claim_dir and pass_dir and claim_dir != pass_dir:
+                    continue  # Direction conflict; abstain
+
                 if rise_match_claim.groups() == rise_match_pass.groups():
                     return Assessment(
                         assessment_id=assessment_id,
