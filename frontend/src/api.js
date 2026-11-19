@@ -24,8 +24,8 @@ export const getJobClaims = (jobId) => request(`/api/verify/${jobId}/claims`);
 
 export const getJobReport = (jobId) => request(`/api/verify/${jobId}/report`);
 
-export const searchEvidence = (query, limit = 5) =>
-  request(`/api/evidence/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+export const searchEvidence = (query, limit = 5, providers = 'openalex,crossref,semantic_scholar') =>
+  request(`/api/evidence/search?q=${encodeURIComponent(query)}&limit=${limit}${providers ? `&providers=${encodeURIComponent(providers)}` : ''}`);
 
 export const checkOpenAccess = (doi) =>
   request(`/api/evidence/open-access?doi=${encodeURIComponent(doi)}`);

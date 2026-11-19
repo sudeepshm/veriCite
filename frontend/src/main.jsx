@@ -1,56 +1,71 @@
-import React,{useState,useEffect} from 'react';
-import {createRoot} from 'react-dom/client';
-import {MessageSquare,ShieldCheck,LayoutDashboard,FileText,BookOpen,History,Download,Upload,Search,Check,AlertTriangle,ExternalLink,RotateCcw,ChevronRight,FlaskConical} from 'lucide-react';
-import {statuses,sampleText,sampleClaims,extract,report,csv} from './engine';
+import React, { useState, useEffect } from 'react';
+import { createRoot } from 'react-dom/client';
+import { RouterProvider, useRouter } from './router';
+import { HomePage } from './pages/HomePage';
+import { WorkspacePage } from './pages/WorkspacePage';
+import { sampleText, sampleClaims } from './engine';
+import { checkHealth } from './api';
 import './styles.css';
-import {checkHealth,submitDocument,getJobStatus,getJobReport} from './api';
-const initial=()=>({title:'Active learning · literature review',analyzedTitle:'Active learning · literature review',text:sampleText,claims:sampleClaims(),mode:'Sample demo',reviews:{},history:[]});
-function restore(){try{const x=JSON.parse(localStorage.getItem('vericite-v1'));return x&&Array.isArray(x.claims)&&typeof x.text==='string'&&x.reviews&&Array.isArray(x.history)?{...x,analyzedTitle:x.analyzedTitle||x.title}:initial();}catch{return initial();}}
-function Badge({status}){return <span className={'badge '+status.toLowerCase().replaceAll(' ','-')}>{status}</span>}
-function download(name,content,type){const url=URL.createObjectURL(new Blob([content],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function Evidence({row,review,onReview}){const [note,setNote]=useState(review?.note||'');return <aside className="evidence panel"><div className="eyebrow">EVIDENCE INSPECTOR</div><h2>Behind the claim</h2><Badge status={row.status}/><blockquote>{row.claim}</blockquote><div className="section-label">SOURCE EVIDENCE</div><div className="excerpt">{row.evidence}<small>{row.section}</small></div><div className="section-label">WHY THIS VERDICT?</div><p>{row.reason}</p><div className="confidence"><ShieldCheck size={18}/><span>{row.confidence?`${row.confidence} illustrative confidence`:'Confidence unavailable'}</span></div><div className="section-label">MATCHED REFERENCE</div>{row.references.length?row.references.map(r=><p className="reference" key={r}>{r}</p>):<p>No matching reference found.</p>}{row.source&&<a className="source-link" href={row.source} target="_blank" rel="noreferrer">Inspect original publication <ExternalLink size={15}/></a>}<div className="review"><label htmlFor="note">Reviewer note</label><textarea id="note" value={note} onChange={e=>setNote(e.target.value)} placeholder="What needs a closer look?" rows={3}/><div className="actions"><button onClick={()=>onReview('Reviewed',note)}><Check size={16}/>Mark reviewed</button><button className="secondary" onClick={()=>onReview('Needs follow-up',note)}>Flag</button></div>{review&&<small>Review: {review.decision} · {new Date(review.at).toLocaleString()}</small>}</div></aside>}
-function App(){
- const [state,setState]=useState(restore),[tab,setTab]=useState('Document'),[thread,setThread]=useState([]),[question,setQuestion]=useState(''),[selected,setSelected]=useState(null),[query,setQuery]=useState(''),[filter,setFilter]=useState('All verdicts'),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[backendOnline,setBackendOnline]=useState(false),[stage,setStage]=useState(null);
-  useEffect(()=>{checkHealth().then(()=>setBackendOnline(true)).catch(()=>setBackendOnline(false));},[]);
- useEffect(()=>{try{localStorage.setItem('vericite-v1',JSON.stringify(state))}catch{setMessage('Browser storage unavailable. Export your report to keep your work.')}},[state]);
- const update=patch=>setState(s=>({...s,...patch}));
- const visible=state.claims.filter(r=>(filter==='All verdicts'||r.status===filter)&&(r.claim+' '+r.references.join(' ')).toLowerCase().includes(query.toLowerCase()));
- const row=visible.find(r=>r.id===selected)||visible[0];
- const reviewed=Object.keys(state.reviews).length;
- function loadSample(){setThread([]);setQuestion('');setState(initial());setSelected(null);setQuery('');setFilter('All verdicts');setMessage('Sample restored. Verdicts and evidence are illustrative.');}
-  async function analyze(){if(!state.text.trim()){setMessage('Paste text or upload a TXT/Markdown document first.');return;}if(backendOnline){setBusy(true);setStage(null);setMessage('Submitting document to verification backend…');try{const{job_id}=await submitDocument(state.text,state.title||'document.txt');setMessage('Verification started. Parsing document…');const stageNames={1:'Parsing document…',2:'Extracting claims & references…',3:'Resolving references…',4:'Retrieving source passages…',5:'Verifying claims against evidence…'};const poll=async()=>{try{const job=await getJobStatus(job_id);setStage(job.current_stage);if(job.current_stage)setMessage(stageNames[job.current_stage]||'Processing…');if(job.job_state==='completed'){const rpt=job.report||await getJobReport(job_id);const verdictMap={SUPPORTED:'Supported',PARTLY_SUPPORTED:'Partly supported',CONTRADICTORY:'Contradictory',UNSUPPORTED:'Unsupported'};const localExtracted=extract(state.text);const claimsList=(rpt.claims&&rpt.claims.length)?rpt.claims:localExtracted;const assessments=rpt.assessments||[];const links=rpt.links||[];const references=rpt.references||[];const passages=rpt.passages||[];const passageMap=new Map(passages.map(p=>[p.passage_id,p]));const refMap=new Map(references.map(r=>[r.ref_id,r]));const hasAssessments=assessments.length>0;const backendClaims=[];claimsList.forEach((c,i)=>{const claimText=c.normalized_text||c.original_span||c.claim||`Claim ${i+1}`;const claimLinks=links.filter(l=>l.claim_id===c.claim_id);if(claimLinks.length>0){claimLinks.forEach((lk,linkIdx)=>{const asm=lk.ref_id?assessments.find(a=>a.claim_id===c.claim_id&&a.ref_id===lk.ref_id):null;const refObj=lk.ref_id?refMap.get(lk.ref_id):null;const markerStr=lk.citation_marker||(refObj&&refObj.raw_marker)||'';const refDisplay=refObj?`${refObj.raw_marker?`${refObj.raw_marker} `:''}${refObj.authors?.join(', ')||''} (${refObj.year||''}) ${refObj.title||''}`.trim():(markerStr?`Citation ${markerStr}`:'');let verdict='Unverified';let confidence=null;let reason=asm?(asm.explanation||'Assessment completed.'):(lk.mapping_status==='unmatched'?`Unmatched citation marker ${lk.citation_marker||''}.`.trim():'Candidate claim awaiting verification.');let evidence='No source passage available.';let section='Not available';let flags=asm?(asm.issue_flags||[]):(lk.mapping_status==='unmatched'?['unmatched_citation']:[]);if(asm){if(asm.semantic_verdict){verdict=verdictMap[asm.semantic_verdict]||'Unverified';}else if(asm.assessment_status==='unable_to_assess'){verdict='Unable to assess';}else if(asm.assessment_status==='failed'){verdict='Failed';}if(asm.confidence_score!=null){confidence=asm.confidence_score>0.7?'High':asm.confidence_score>0.4?'Medium':'Low';}if(asm.evidence_passage_ids&&asm.evidence_passage_ids.length>0){const matched=asm.evidence_passage_ids.map(pid=>passageMap.get(pid)).filter(Boolean);if(matched.length>0){evidence=matched.map(p=>p.verbatim_text).join('\n\n');section=matched.map(p=>p.section||(p.page?`Page ${p.page}`:'Retrieved passage')).join(', ');}}}backendClaims.push({id:`${c.claim_id||i+1}_${lk.ref_id||linkIdx}`,claimId:c.claim_id,refId:lk.ref_id,claim:claimText,markers:markerStr?[markerStr]:[],references:refDisplay?[refDisplay]:[],status:verdict,confidence,evidence,section,reason,flags,source:(rpt.sources&&lk.ref_id)?(rpt.sources.find(s=>s.ref_id===lk.ref_id)?.source_url||null):null});});}else{backendClaims.push({id:c.claim_id||`claim-${i+1}`,claimId:c.claim_id,claim:claimText,markers:[],references:[],status:'Unverified',confidence:null,evidence:'No source passage available.',section:'Not available',reason:'Candidate claim with no citation markers.',flags:['missing_citation'],source:null});}});setThread([]);setQuestion('');update({claims:backendClaims.length?backendClaims:localExtracted,analyzedTitle:state.title,mode:hasAssessments?'AI-verified document':'Custom document · unverified',reviews:{},history:[]});setSelected(null);setFilter('All verdicts');setQuery('');setTab('Overview');setStage(null);setBusy(false);setMessage(hasAssessments?`Verification complete: ${assessments.length} claim–reference pairs assessed.`:`Showing local extraction (${backendClaims.length} candidate claims).`);return;}if(job.job_state==='failed'){setMessage('Verification failed: '+(job.error_message||'Unknown error.')+' Falling back to local extraction.');const c=extract(state.text);update({claims:c,analyzedTitle:state.title,mode:'Custom document · unverified (backend failed)',reviews:{},history:[]});setSelected(null);setFilter('All verdicts');setQuery('');setTab('Overview');setStage(null);setBusy(false);return;}setTimeout(poll,2000);}catch(err){setMessage('Polling error: '+err.message);setBusy(false);}};await poll();}catch(e){setMessage('Backend error: '+e.message+'. Using local extraction.');const c=extract(state.text);if(!c.length){setMessage('No candidate sentences found.');setBusy(false);return;}update({claims:c,analyzedTitle:state.title,mode:'Custom document · unverified',reviews:{},history:[]});setSelected(null);setFilter('All verdicts');setQuery('');setTab('Overview');setBusy(false);}}else{const claims=extract(state.text);if(!claims.length){setMessage('No candidate sentences found. Add a sentence longer than 12 characters.');return;}setThread([]);setQuestion('');update({claims,analyzedTitle:state.title,mode:'Custom document · unverified',reviews:{},history:[]});setSelected(null);setFilter('All verdicts');setQuery('');setTab('Overview');setMessage(`Extracted ${claims.length} candidate claims. Connect the backend for AI-powered verification.`);}}
- async function upload(file){if(!file)return;if(!/\.(txt|md)$/i.test(file.name)){setMessage('Please use a .txt or .md file. PDF and DOCX parsing are planned for the backend.');return;}if(file.size>1024*1024){setMessage('Choose a file smaller than 1 MB.');return;}setBusy(true);try{update({text:await file.text(),title:file.name});setMessage('Document loaded. Select Extract claims to process it.');}catch{setMessage('Could not read this file. Try pasting its text.');}finally{setBusy(false);}}
- function review(decision,note){const entry={claimId:row.id,decision,note,at:new Date().toISOString()};setState(s=>({...s,reviews:{...s.reviews,[row.id]:entry},history:[entry,...s.history]}));setMessage('Review saved in this browser.');}
- function ask(input){
-   const q=input.trim();
-   if(!q)return;
-   const rows=state.claims;
-   const number=q.match(/claim\s*#?\s*(\d+)/i);
-   const previous=thread.at(-1)?.index;
-   const terms=q.toLowerCase().match(/[a-z0-9]{3,}/g)||[];
-   const matches=rows.map((r,index)=>({index,score:terms.filter(t=>!['the','and','what','for','this','about','does','show','claim'].includes(t)&&(r.claim+' '+r.references.join(' ')).toLowerCase().includes(t)).length})).sort((a,b)=>b.score-a.score);
-   let index=number?Number(number[1])-1:matches[0]?.score?matches[0].index:previous;
-   let a;
-   if(/summari|summary|overview/i.test(q)){
-     index=undefined;
-     a=state.analyzedTitle+'\n'+rows.length+' candidate claims. '+rows.filter(r=>r.references.length).length+' have mapped references.\n'+statuses.map(status=>[status,rows.filter(r=>r.status===status).length]).filter(([,n])=>n).map(([status,n])=>status+' · '+n).join('\n');
-   }else if(!number&&/issues|flagged|missing citations/i.test(q)){
-     index=undefined;
-     a=rows.flatMap((r,i)=>r.flags.length?['Claim '+(i+1)+' — '+r.flags.join(', ')]:[]).join('\n')||'No citation issues are recorded.';
-   }else if(rows[index]){
-     const r=rows[index];
-     a='Claim '+(index+1)+' — '+r.claim+'\n'+r.status+' · '+r.reason+'\n'+r.evidence+'\n'+(r.references.join('\n')||'No mapped reference.');
-   }else a='Try a claim number from 1 to '+rows.length+', a phrase from the paper, or “Show citation issues”.';
-   setThread(t=>[...t,{q,a,index}]);setQuestion('');
- }
- const exportJson=()=>download('vericite-report.json',JSON.stringify(report(state),null,2),'application/json');
- return <div className="app"><nav className="sidebar"><a className="brand" href="#" onClick={e=>{e.preventDefault();setTab('Overview')}}><span className="brand-icon"><ShieldCheck/></span>veri<span>Cite</span></a><div className="workspace-label">RESEARCH WORKSPACE</div>{[[FileText,'Document'],[LayoutDashboard,'Overview'],[MessageSquare,'Paper chat'],[BookOpen,'References'],[History,'Review history']].map(([Icon,label])=><button key={label} className={'nav-link '+(tab===label?'active':'')} onClick={()=>setTab(label)}><Icon size={19}/>{label==='Document'?'Verify document':label}{label==='Overview'&&<span className="nav-count">{state.claims.length}</span>}</button>)}<div className="sidebar-bottom"><BookOpen size={22}/><strong>Current paper</strong><p>{state.analyzedTitle}</p></div><div className="profile"><span>R</span><div>Research workspace<small>Local browser session</small></div></div></nav>
- <main><header><div className="breadcrumb">Workspace <ChevronRight size={15}/> {tab}</div><button className="secondary" onClick={exportJson}><Download size={16}/>Export report</button></header><div className="content"><div className="heading"><h1>{tab==='Document'?'Verify a research document':tab==='Overview'?'Verification results':tab}</h1><p>{tab==='Document'?'Upload your paper to extract claims and trace their citations.':state.analyzedTitle}</p></div><div className="notice"><FlaskConical size={19}/><span><strong>{state.mode}.</strong> {backendOnline?'Connected to AI verification backend.'+(stage?' Stage '+stage+'/5: verifying…':''):'No live AI or source retrieval. Sample evidence is illustrative; custom claims remain unverified.'}</span><button onClick={loadSample}>Load sample</button></div>{message&&<div role="status" className="toast">{message}<button aria-label="Dismiss message" onClick={()=>setMessage('')}>×</button></div>}
- {tab==='Document'?<section className="panel document"><h2>Upload your paper</h2><p>Paste academic text with a References section, or import a TXT/Markdown file (up to 1 MB).</p><label className="upload" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();if(!busy)upload(e.dataTransfer.files[0])}}><Upload size={34}/><strong>{busy?'Reading document…':'Drop your document here'}</strong><input type="file" accept=".txt,.md" disabled={busy} onChange={e=>{upload(e.target.files[0]);e.target.value=''}}/></label><div className="workflow">{['Extract claims','Map citations','View verdicts','Inspect evidence','Find citation issues','Search and filter','Record review','Export report'].map((label,i)=><span key={label}><b>{String(i+1).padStart(2,'0')}</b>{label}</span>)}</div><label htmlFor="title">Document name</label><input id="title" value={state.title} onChange={e=>update({title:e.target.value})}/><label htmlFor="document">Document text</label><textarea id="document" rows={15} value={state.text} onChange={e=>update({text:e.target.value})}/><div className="actions"><button disabled={busy} onClick={analyze}>Extract claims</button><button className="secondary" onClick={loadSample}><RotateCcw size={16}/>Load sample</button></div><small>Local heuristics detect candidate sentences and [1] or (Author, Year) citations. This is not scientific claim verification.</small></section>:
- tab==='Paper chat'?<section className="panel conversation"><h2>Ask about this paper</h2><p>Explore the current verification results by claim number, keyword, or citation.</p><div className="actions">{['Summarize the paper','Show citation issues','Explain claim 1'].map(q=><button className="secondary" key={q} onClick={()=>ask(q)}>{q}</button>)}</div><div aria-live="polite">{thread.map(({q,a},i)=><article key={i}><strong>{q}</strong><p>{a}</p></article>)}</div><form onSubmit={e=>{e.preventDefault();ask(question)}}><input aria-label="Question about the current paper" placeholder="Ask a follow-up question…" value={question} onChange={e=>setQuestion(e.target.value)}/><button disabled={!question.trim()}>Send</button></form></section>:
- tab==='References'?<section className="panel reference-list"><h2>Follow the source trail</h2><p>References mapped to your extracted claims. Metadata has not been checked against a live service.</p>{[...new Set(state.claims.flatMap(r=>r.references))].map((ref,i)=><article key={ref}><span className="ref-icon"><BookOpen/></span><div><h3>Reference {i+1}</h3><p>{ref}</p><small>Linked to {state.claims.filter(r=>r.references.includes(ref)).length} claims</small></div></article>)}{!state.claims.some(r=>r.references.length)&&<p>No mapped references. Add a References heading and numbered entries to your document.</p>}<h3>Citation issues</h3>{state.claims.filter(r=>r.flags.length).map(r=><button className="issue" key={r.id} onClick={()=>{setSelected(r.id);setTab('Overview')}}><AlertTriangle size={18}/><span>{r.flags.join(' · ')}<small>{r.claim}</small></span></button>)}</section>:
- tab==='Review history'?<section className="panel history"><h2>A transparent review trail</h2><p>{state.history.length} decisions saved on this device.</p>{!state.history.length&&<div className="empty"><History/><h3>No reviews yet</h3><p>Open a claim in Overview, add a note, and mark it reviewed or flag it.</p></div>}{state.history.map((h,i)=><article key={i}><span className="history-icon"><Check size={18}/></span><div><strong>{h.decision}</strong><p>{state.claims.find(r=>r.id===h.claimId)?.claim}</p>{h.note&&<blockquote>{h.note}</blockquote>}<small>{new Date(h.at).toLocaleString()}</small></div></article>)}</section>:
- <><section className="stats">{[[state.claims.length,'Claims extracted','Ready for inspection'],[state.claims.filter(r=>r.status==='Supported').length,'Supported','Illustrative sample verdicts'],[state.claims.filter(r=>r.status!=='Supported').length,'Need attention','Check scope, sources & context'],[`${reviewed}/${state.claims.length}`,'Human reviewed','Your review progress']].map(([n,l,h])=><div key={l}><span>{l}</span><strong>{n}</strong><small>{h}</small></div>)}</section><div className="results-heading"><div><h2>Claim-by-claim review</h2><p>{state.analyzedTitle||state.title}</p></div><button className="secondary" onClick={()=>setTab('Document')}><Upload size={16}/>New document</button></div><div className="toolbar"><label className="search"><Search size={18}/><input aria-label="Search claims and references" placeholder="Search claims or references…" value={query} onChange={e=>setQuery(e.target.value)}/></label><select aria-label="Filter verdicts" value={filter} onChange={e=>setFilter(e.target.value)}>{['All verdicts',...statuses].map(s=><option key={s}>{s}</option>)}</select><button className="secondary" onClick={()=>download('vericite-claims.csv',csv(state.claims),'text/csv')}>Export CSV</button></div><div className="review-grid"><section className="claim-list" aria-label="Extracted claims">{visible.map((r,i)=><button key={r.id} onClick={()=>setSelected(r.id)} className={'claim-card '+(row?.id===r.id?'selected':'')}><div className="card-top"><span>CLAIM {state.claims.indexOf(r)+1 < 10?'0':''}{state.claims.indexOf(r)+1}</span><Badge status={r.status}/></div><h3>{r.claim}</h3><div className="card-bottom"><span><BookOpen size={14}/>{r.markers.join(', ')||'No citation'}</span><span>{state.reviews[r.id]?.decision||'Awaiting review'}</span></div>{r.flags.length>0&&<div className="flag"><AlertTriangle size={13}/>{r.flags.join(' · ')}</div>}</button>)}{!visible.length&&<div className="panel empty"><Search/><h3>No matching claims</h3><p>Try another search or verdict filter.</p><button onClick={()=>{setQuery('');setFilter('All verdicts')}}>Clear filters</button></div>}</section>{row&&visible.length>0&&<Evidence key={row.id} row={row} review={state.reviews[row.id]} onReview={review}/>}</div></>}
- <footer><span><ShieldCheck size={15}/> Evidence first. Human judgment always.</span><span>veriCite · Problem statement 03</span></footer></div></main></div>
+
+const initial = () => ({
+  title: 'Active learning · literature review',
+  analyzedTitle: 'Active learning · literature review',
+  text: sampleText,
+  claims: sampleClaims(),
+  mode: 'Sample demo',
+  reviews: {},
+  history: []
+});
+
+function restore() {
+  try {
+    const x = JSON.parse(localStorage.getItem('vericite-v1'));
+    return x && Array.isArray(x.claims) && typeof x.text === 'string' && x.reviews && Array.isArray(x.history)
+      ? { ...x, analyzedTitle: x.analyzedTitle || x.title }
+      : initial();
+  } catch {
+    return initial();
+  }
 }
-createRoot(document.getElementById('root')).render(<App/>);
+
+function RootApp() {
+  const { path } = useRouter();
+  const [state, setState] = useState(restore);
+  const [backendOnline, setBackendOnline] = useState(false);
+
+  useEffect(() => {
+    checkHealth()
+      .then(() => setBackendOnline(true))
+      .catch(() => setBackendOnline(false));
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('vericite-v1', JSON.stringify(state));
+    } catch {
+      // storage unavailable
+    }
+  }, [state]);
+
+  // Route matching:
+  // "/" => Public Homepage
+  // "/workspace*" => Verification & Simulation Workspace
+  if (path === '/' || path === '') {
+    return <HomePage />;
+  }
+
+  return (
+    <WorkspacePage
+      state={state}
+      setState={setState}
+      backendOnline={backendOnline}
+    />
+  );
+}
+
+const root = createRoot(document.getElementById('root'));
+root.render(
+  <RouterProvider>
+    <RootApp />
+  </RouterProvider>
+);
