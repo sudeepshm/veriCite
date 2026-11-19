@@ -278,8 +278,45 @@ async def _s2_lookup(
 # Main resolver
 # ---------------------------------------------------------------------------
 
-async def resolve_reference(ref: Reference, client: httpx.AsyncClient) -> ResolvedSource:
+async def resolve_reference(
+    ref: Reference,
+    client: httpx.AsyncClient,
+    test_resolver: Any | None = None,
+) -> ResolvedSource:
     source_id = f"src_{uuid.uuid4().hex[:12]}"
+
+    if test_resolver is not None:
+        if callable(test_resolver):
+            override = test_resolver(ref)
+            if override is not None:
+                return override
+        elif isinstance(test_resolver, dict):
+            raw = (ref.raw_marker or "").strip("[] ")
+            target_path = (
+                test_resolver.get(ref.raw_marker)
+                or test_resolver.get(raw)
+                or test_resolver.get(ref.ref_id)
+                or (test_resolver.get(ref.title) if ref.title else None)
+            )
+            if target_path:
+                from pathlib import Path
+                p = Path(target_path)
+                if not p.is_file():
+                    p = Path("backend") / target_path
+                if p.is_file():
+                    return ResolvedSource(
+                        source_id=source_id,
+                        ref_id=ref.ref_id,
+                        identity_status=IdentityStatus.matched,
+                        matched_title=ref.title or f"Offline Source {ref.raw_marker}",
+                        matched_authors=ref.authors,
+                        matched_year=ref.year,
+                        source_url=str(p.resolve()),
+                        coverage=CoverageStatus.unavailable,
+                        is_retracted=False,
+                        retraction_note=None,
+                        age_flag=False,
+                    )
 
     canonical_doi: str | None = None
     openalex_id: str | None = None
@@ -392,21 +429,6 @@ async def resolve_reference(ref: Reference, client: httpx.AsyncClient) -> Resolv
         if s2_url:
             source_url = s2_url
 
-    # Check for offline local file mapping (e.g. source-1.txt, source-2.txt)
-    ref_num = 1
-    if "_r" in ref.ref_id:
-        try:
-            ref_num = int(ref.ref_id.split("_r")[-1]) + 1
-        except Exception:
-            ref_num = 1
-    from pathlib import Path
-    for p in [Path(f"source-{ref_num}.txt"), Path(f"backend/source-{ref_num}.txt")]:
-        if p.is_file():
-            identity_status = IdentityStatus.matched
-            source_url = str(p.resolve())
-            matched_title = ref.title or f"Offline Source {ref_num}"
-            break
-
     return ResolvedSource(
         source_id=source_id,
         ref_id=ref.ref_id,
@@ -438,7 +460,11 @@ def _ref_key(ref: Reference) -> str:
     return f"title:{title_key}|year:{year_key}"
 
 
-async def resolve_all_references(refs: list[Reference]) -> list[ResolvedSource]:
+async def resolve_all_references(
+    refs: list[Reference],
+    client: httpx.AsyncClient | None = None,
+    test_resolver: Any | None = None,
+) -> list[ResolvedSource]:
     """Resolve all references with deduplication and concurrency limit of 3."""
     sem = asyncio.Semaphore(3)
 
@@ -457,9 +483,9 @@ async def resolve_all_references(refs: list[Reference]) -> list[ResolvedSource]:
     cache: dict[str, ResolvedSource] = {}
     results: list[ResolvedSource] = []
 
-    async def _resolve_one(key: str, ref: Reference, client: httpx.AsyncClient) -> None:
+    async def _resolve_one(key: str, ref: Reference, http_client: httpx.AsyncClient) -> None:
         async with sem:
-            resolved = await resolve_reference(ref, client)
+            resolved = await resolve_reference(ref, http_client, test_resolver=test_resolver)
         cache[key] = resolved
         results.append(resolved)
         # Emit cloned sources for duplicate refs (same paper, different ref_ids)
@@ -472,11 +498,18 @@ async def resolve_all_references(refs: list[Reference]) -> list[ResolvedSource]:
             )
             results.append(dup)
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    if client is not None:
         tasks = [
             asyncio.create_task(_resolve_one(key, ref, client))
             for key, ref in unique.items()
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
+    else:
+        async with httpx.AsyncClient(follow_redirects=True) as local_client:
+            tasks = [
+                asyncio.create_task(_resolve_one(key, ref, local_client))
+                for key, ref in unique.items()
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     return results

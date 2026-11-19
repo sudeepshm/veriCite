@@ -22,7 +22,7 @@ from app.models import (
     Reference,
 )
 from app.providers import extract_claims_gemini
-from app.config import MAX_RETRIES
+from app.config import MAX_RETRIES, GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +96,6 @@ def _get_sentence_containing(text: str, char_pos: int) -> str:
 def parse_references(blocks: list[DocumentBlock]) -> list[Reference]:
     """Parse bibliography blocks into Reference objects."""
     bib_blocks = [b for b in blocks if b.block_type == BlockType.bibliography]
-    if not bib_blocks:
-        bib_blocks = [
-            b for b in blocks
-            if (b.section and any(k in b.section.lower() for k in ("reference", "bibliography")))
-            or re.search(r"^\s*\[\d+\]\s+[A-Z]", b.text, re.MULTILINE)
-        ]
     if not bib_blocks:
         return []
 
@@ -363,62 +357,75 @@ async def extract_claims_and_links(
         if not markers:
             continue
 
-        # Collect all ref_ids for this block (across all markers)
-        all_ref_ids_for_block: list[str] = []
-        for _, _, _, mids in markers:
-            for rid in mids:
-                if rid not in all_ref_ids_for_block:
-                    all_ref_ids_for_block.append(rid)
-
-        # Unmatched markers
-        for marker_text, cs, ce, mids in markers:
-            if not mids:
-                issues.append(
-                    f"block={block.block_id}: unmatched citation marker '{marker_text}'"
-                )
-
-        # Process each marker individually (call Gemini per marker for precision)
+        # Process each marker individually
         for marker_index, (marker_text, cs, ce, marker_ref_ids) in enumerate(markers):
             # Find the clause containing this marker
             clause_text = _get_sentence_containing(block.text, cs)
 
-            # Allowed ref_ids for this marker call
-            allowed_ref_ids = marker_ref_ids if marker_ref_ids else all_ref_ids_for_block
-            if not allowed_ref_ids:
-                # No refs resolved — record issue but skip Gemini call
+            # Unmatched marker: preserve the claim and original marker, record unmatched occurrence,
+            # and create zero verification pairs for it (a neighboring sentence must never supply its ref).
+            if not marker_ref_ids:
                 issues.append(
-                    f"block={block.block_id}: no ref_ids for marker '{marker_text}'; skipping"
+                    f"block={block.block_id}: unmatched citation marker '{marker_text}'"
+                )
+                short_uuid = uuid.uuid4().hex[:8]
+                claim_id = f"{block.document_id}_c{short_uuid}"
+                claims.append(
+                    Claim(
+                        claim_id=claim_id,
+                        document_id=block.document_id,
+                        block_id=block.block_id,
+                        original_span=clause_text.strip(),
+                        normalized_text=clause_text.strip(),
+                        char_start=None,
+                        char_end=None,
+                    )
+                )
+                links.append(
+                    ClaimReferenceLink(
+                        link_id=f"lnk_{uuid.uuid4().hex[:12]}",
+                        claim_id=claim_id,
+                        ref_id="",
+                        citation_marker=marker_text,
+                        marker_char_start=cs,
+                        marker_char_end=ce,
+                        citation_group_id=None,
+                        mapping_status=MappingStatus.unmatched,
+                    )
                 )
                 continue
 
-            # Call Gemini with retries
+            allowed_ref_ids = list(marker_ref_ids)
+
+            # Call Gemini with retries if API key configured
             claim_dicts: list[dict] = []
             last_error: str | None = None
-            for attempt in range(MAX_RETRIES):
-                try:
-                    claim_dicts = await extract_claims_gemini(
-                        paragraph_text=block.text,
-                        marked_span=marker_text,
-                        allowed_ref_ids=allowed_ref_ids,
-                        original_span=clause_text,
-                    )
-                    last_error = None
-                    break
-                except RuntimeError as exc:
-                    last_error = str(exc)
-                    logger.warning(
-                        "extract_claims_gemini attempt %d/%d failed: %s",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        last_error,
-                    )
-                    await asyncio.sleep(2 ** attempt)  # exponential back-off
+            if GEMINI_API_KEY:
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        claim_dicts = await extract_claims_gemini(
+                            paragraph_text=block.text,
+                            marked_span=marker_text,
+                            allowed_ref_ids=allowed_ref_ids,
+                            original_span=clause_text,
+                        )
+                        last_error = None
+                        break
+                    except RuntimeError as exc:
+                        last_error = str(exc)
+                        logger.warning(
+                            "extract_claims_gemini attempt %d/%d failed: %s",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            last_error,
+                        )
+                        await asyncio.sleep(2 ** attempt)  # exponential back-off
 
-            if last_error is not None:
-                issues.append(
-                    f"block={block.block_id} marker='{marker_text}': "
-                    f"Gemini extraction failed: {last_error}. Using deterministic clause fallback."
-                )
+                if last_error is not None:
+                    issues.append(
+                        f"block={block.block_id} marker='{marker_text}': "
+                        f"Gemini extraction failed: {last_error}. Using deterministic clause fallback."
+                    )
 
             if not claim_dicts:
                 claim_dicts = [{
@@ -428,10 +435,8 @@ async def extract_claims_and_links(
                     "qualifiers": "",
                 }]
 
-            # Determine if the whole marker group is ambiguous
-            is_ambiguous_group = (
-                len(marker_ref_ids) > 1 or not marker_ref_ids
-            )
+            # Determine if the marker group is ambiguous (multiple refs for one marker)
+            is_ambiguous_group = len(marker_ref_ids) > 1
 
             for claim_dict in claim_dicts:
                 # Build Claim
@@ -452,7 +457,7 @@ async def extract_claims_and_links(
                 ref_ids_for_claim: list[str] = claim_dict.get("ref_ids", []) or allowed_ref_ids
                 group_id = (
                     f"group_{block.block_id}_{marker_index}"
-                    if is_ambiguous_group or len(ref_ids_for_claim) == len(allowed_ref_ids)
+                    if is_ambiguous_group
                     else None
                 )
                 for rid in ref_ids_for_claim:
@@ -466,7 +471,7 @@ async def extract_claims_and_links(
                             marker_char_start=cs,
                             marker_char_end=ce,
                             citation_group_id=group_id,
-                            mapping_status=MappingStatus.mapped,
+                            mapping_status=MappingStatus.ambiguous if is_ambiguous_group else MappingStatus.mapped,
                         )
                     )
 
@@ -481,7 +486,7 @@ async def extract_claims_and_links(
 
     # Remap links to deduplicated claim IDs and drop duplicate links
     deduped_links: list[ClaimReferenceLink] = []
-    seen_links: set[tuple[str, str]] = set()
+    seen_links: set[tuple[str, str, str]] = set()
     for lk in links:
         target_claim_id = lk.claim_id
         matching_claim = next((c for c in claims if c.claim_id == lk.claim_id), None)
@@ -489,7 +494,7 @@ async def extract_claims_and_links(
             key = matching_claim.normalized_text.strip().lower() or matching_claim.original_span.strip().lower()
             target_claim_id = seen_texts.get(key, lk.claim_id)
 
-        pair_key = (target_claim_id, lk.ref_id)
+        pair_key = (target_claim_id, lk.ref_id, lk.citation_marker)
         if pair_key not in seen_links:
             seen_links.add(pair_key)
             if target_claim_id != lk.claim_id:

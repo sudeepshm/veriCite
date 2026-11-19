@@ -367,6 +367,9 @@ def _plain_blocks(content: bytes, document_id: str) -> tuple[list[DocumentBlock]
     except Exception as exc:
         raise ValueError(f"Could not decode text content: {exc}") from exc
 
+    # Normalize all newlines (CRLF, CR -> LF) before heading and paragraph detection
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     # Normalize: ensure standalone heading lines (e.g. "References\n[1]")
     # have paragraph breaks so heading detection works reliably.
     text = re.sub(

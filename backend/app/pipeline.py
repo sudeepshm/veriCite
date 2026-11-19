@@ -19,6 +19,7 @@ from app.models import (
     Reference,
     Claim,
     ClaimReferenceLink,
+    MappingStatus,
     ResolvedSource,
     Passage,
     Assessment,
@@ -92,6 +93,7 @@ async def run_pipeline(
     content: bytes,
     filename: str,
     content_type: str,
+    test_resolver: Any | None = None,
 ) -> None:
     """Run the full 5-stage CiteVerify pipeline for *job_id*.
 
@@ -170,7 +172,7 @@ async def run_pipeline(
         update_job(3, JobState.running)
         resolved_sources: list[ResolvedSource] = []
         try:
-            resolved_sources = await resolve_all_references(refs)
+            resolved_sources = await resolve_all_references(refs, test_resolver=test_resolver)
             for src in resolved_sources:
                 save_resolved_source(src)
         except Exception as e:
@@ -181,6 +183,7 @@ async def run_pipeline(
         # ------------------------------------------------------------------
         update_job(4, JobState.running)
         all_passages: dict[str, list[Passage]] = {}  # source_id → passages
+        updated_sources_map: dict[str, ResolvedSource] = {}
         try:
             # Group claim texts by ref_id so the retriever can use them as
             # search queries when fetching relevant passages.
@@ -205,13 +208,19 @@ async def run_pipeline(
                         save_resolved_source(updated_src)
                         save_passages(passages)
                         all_passages[src.source_id] = passages
+                        updated_sources_map[src.ref_id] = updated_src
                     except Exception as exc:
                         stage_errors.append(
                             f"Stage 4 error for ref {src.ref_id}: {exc}"
                         )
                         all_passages[src.source_id] = []
+                        updated_sources_map[src.ref_id] = src
 
                 await asyncio.gather(*[retrieve_one(src) for src in resolved_sources])
+
+            resolved_sources = [
+                updated_sources_map.get(src.ref_id, src) for src in resolved_sources
+            ]
         except Exception as e:
             stage_errors.append(f"Stage 4 error: {e}")
 
@@ -226,6 +235,8 @@ async def run_pipeline(
             }
 
             for link in links:
+                if not link.ref_id or link.mapping_status == MappingStatus.unmatched:
+                    continue
                 claim = next(
                     (c for c in claims if c.claim_id == link.claim_id), None
                 )
@@ -246,6 +257,9 @@ async def run_pipeline(
         except Exception as e:
             stage_errors.append(f"Stage 5 error: {e}")
 
+        # Flatten all retrieved passages
+        flattened_passages = [p for plist in all_passages.values() for p in plist]
+
         # ------------------------------------------------------------------
         # Build final report
         # ------------------------------------------------------------------
@@ -258,6 +272,7 @@ async def run_pipeline(
             sources=resolved_sources,
             assessments=all_assessments,
             stage_errors=stage_errors,
+            passages=flattened_passages,
         )
 
         # Persist completed job

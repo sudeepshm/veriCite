@@ -32,6 +32,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http
 class VerifyRequest(BaseModel):
     text: str
     filename: str = "document.txt"
+    test_source_map: dict[str, str] | None = None
 
 
 # --------------- Existing endpoints ---------------
@@ -76,7 +77,7 @@ def liveness() -> dict[str, str]:
 async def verify(req: VerifyRequest):
     content = req.text.encode("utf-8")
     job = create_job(req.filename, "text/plain")
-    asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain"))
+    asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain", test_resolver=req.test_source_map))
     return {"job_id": job.job_id, "status": "queued"}
 
 

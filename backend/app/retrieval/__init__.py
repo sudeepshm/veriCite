@@ -348,31 +348,25 @@ async def retrieve_source(
     # ------------------------------------------------------------------
     # Step 1 – Download (or get abstract if no URL, or load offline file)
     # ------------------------------------------------------------------
+    # Step 1 – Fetch: local file (if explicitly set by resolver) or remote
+    # ------------------------------------------------------------------
     abstract_text: str | None = None
     have_pdf = False
+    raw_chunks: list[tuple[str, str | None, int | None, str | None]] = []
 
-    ref_num = 1
-    if "_r" in source.ref_id:
+    local_file: Path | None = None
+    if source.source_url:
+        cleaned_url = source.source_url.removeprefix("file://")
+        p = Path(cleaned_url)
+        if p.is_file():
+            local_file = p
+
+    if local_file is not None:
         try:
-            ref_num = int(source.ref_id.split("_r")[-1]) + 1
-        except Exception:
-            ref_num = 1
-
-    offline_candidates = [
-        Path(source.source_url) if source.source_url and Path(source.source_url).is_file() else None,
-        Path(f"source-{ref_num}.txt"),
-        Path(f"backend/source-{ref_num}.txt"),
-        Path("source-1.txt") if ref_num == 1 else None,
-        Path("backend/source-1.txt") if ref_num == 1 else None,
-    ]
-    offline_file = next((p for p in offline_candidates if p and p.is_file()), None)
-
-    if offline_file is not None:
-        try:
-            content_str = offline_file.read_text(encoding="utf-8", errors="replace")
-            chunks = [s.strip() for s in re.split(r"\n{2,}|\.\s+", content_str) if len(s.strip()) > 10]
-            raw_chunks: list[tuple[str, str | None, int | None, str | None]] = [
-                (c, offline_file.name, None, None) for c in chunks
+            content_str = local_file.read_text(encoding="utf-8", errors="replace")
+            chunks = [s.strip() for s in content_str.splitlines() if len(s.strip()) > 10]
+            raw_chunks = [
+                (c, local_file.name, None, None) for c in chunks
             ]
             coverage = CoverageStatus.full_text
         except Exception:
@@ -391,10 +385,8 @@ async def retrieve_source(
             coverage = CoverageStatus.abstract_only if abstract_text else CoverageStatus.unavailable
 
     # ------------------------------------------------------------------
-    # Step 2 – Parse
+    # Step 2 – Parse (if PDF was downloaded)
     # ------------------------------------------------------------------
-    raw_chunks: list[tuple[str, str | None, int | None, str | None]] = []
-
     if have_pdf and tmp_path is not None:
         try:
             raw_chunks = _parse_pdf(tmp_path)

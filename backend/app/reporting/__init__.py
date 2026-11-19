@@ -12,6 +12,7 @@ from app.models import (
     Reference,
     ClaimReferenceLink,
     ResolvedSource,
+    Passage,
     IdentityStatus,
 )
 
@@ -25,6 +26,7 @@ def build_report(
     sources: list[ResolvedSource],
     assessments: list[Assessment],
     stage_errors: list[str],
+    passages: list[Passage] | None = None,
 ) -> VerificationReport:
     """Build the final VerificationReport for a completed pipeline run.
 
@@ -95,6 +97,9 @@ def build_report(
         total_pairs=len(assessments),
         claims=claims,
         references=refs,
+        links=links,
+        sources=sources,
+        passages=passages or [],
         assessments=assessments,
         issues=issues,
         stage_errors=stage_errors,

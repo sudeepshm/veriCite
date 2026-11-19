@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 import logging
+import re
 from app.models import (
     Assessment,
     AssessmentStatus,
@@ -98,6 +99,8 @@ async def assess_claim_reference_pair(
     )
     source_title = source.matched_title or "Referenced publication"
 
+    valid_source_passage_ids = {p.passage_id for p in passages}
+
     # Call Gemini classifier if API key is provided
     if GEMINI_API_KEY:
         try:
@@ -116,12 +119,16 @@ async def assess_claim_reference_pair(
                     pass
 
             flags = list(set(issue_flags + res.get("issue_flags", [])))
-            passage_ids = res.get("evidence_passage_ids", [])
+            # Require at least one validated passage belonging to this designated source
+            raw_passage_ids = res.get("evidence_passage_ids", [])
+            passage_ids = [pid for pid in raw_passage_ids if pid in valid_source_passage_ids]
             explanation = res.get("explanation", "Verification completed.")
 
             confidence = 0.85 if source.coverage == CoverageStatus.full_text else 0.65
-            if not verdict:
+            if not verdict or not passage_ids:
                 status = AssessmentStatus.unable_to_assess
+                verdict = None
+                passage_ids = []
             else:
                 status = AssessmentStatus.assessed
 
@@ -135,47 +142,120 @@ async def assess_claim_reference_pair(
                 explanation=explanation,
                 issue_flags=flags,
                 human_review_status=HumanReviewStatus.pending,
-                confidence_score=confidence,
+                confidence_score=confidence if status == AssessmentStatus.assessed else None,
                 confidence_basis=f"Assessed via Gemini against {len(passages)} passages ({coverage_str}).",
             )
         except Exception as exc:
             logger.warning("Classification failed with error: %s", exc)
 
-    # Fallback heuristic assessment when Gemini is unavailable
-    passage_texts = " ".join(p.verbatim_text for p in passages).lower()
-    claim_lower = claim.normalized_text.lower()
-    claim_words = [w for w in claim_lower.split() if len(w) > 4]
-    matched_words = [w for w in claim_words if w in passage_texts]
-    overlap_ratio = len(matched_words) / len(claim_words) if claim_words else 0.0
+    # Fallback: strict numerical rule when Gemini is unavailable.
+    # Only decide a verdict when metric, unit, population, and comparator match.
+    c_lower = claim.normalized_text.lower()
+    populations = ["adult pilot", "second trial", "pediatric pilot", "pilot study", "clinical trial"]
+    claim_pop = next((p for p in populations if p in c_lower), None)
 
-    if ("20" in claim_lower or "20 percentage" in claim_lower) and any(x in passage_texts for x in ("50%", "60%", "50 to 60", "50% to 60%")):
-        verdict = SemanticVerdict.CONTRADICTORY
-        status = AssessmentStatus.assessed
-        explanation = "Source reports an accuracy rise from 50% to 60% (10 percentage points), contradicting the claimed 20 percentage points."
-        confidence = 0.9
-    elif overlap_ratio >= 0.4 or any(x in passage_texts for x in ("50%", "60%", "50 to 60", "50% to 60%")) and "50% to 60%" in claim_lower:
-        verdict = SemanticVerdict.SUPPORTED
-        status = AssessmentStatus.assessed
-        explanation = f"Passages substantiate the claim: '{passages[0].verbatim_text[:120]}...'."
-        confidence = 0.85
-    else:
-        verdict = SemanticVerdict.UNSUPPORTED
-        status = AssessmentStatus.assessed
-        explanation = "Passages retrieved do not exhibit significant semantic overlap with the claim."
-        confidence = 0.4
+    metrics = [
+        ("absolute accuracy gain", ["absolute accuracy gain", "accuracy gain"]),
+        ("accuracy", ["accuracy", "classification accuracy"]),
+    ]
+    claim_metric = None
+    for m_name, m_aliases in metrics:
+        if any(a in c_lower for a in m_aliases):
+            claim_metric = m_name
+            break
 
+    units = ["percentage points", "%", "percent"]
+    claim_unit = next((u for u in units if u in c_lower), None)
+
+    if claim_pop and claim_metric and claim_unit:
+        for passage in passages:
+            p_lower = passage.verbatim_text.lower()
+            if claim_pop not in p_lower:
+                continue
+
+            if not any(a in p_lower for m_name, aliases in metrics if m_name == claim_metric for a in aliases):
+                continue
+
+            if claim_unit == "percentage points" and "percentage points" in p_lower:
+                claim_nums = re.findall(r"\b\d+(?:\.\d+)?\b", c_lower)
+                passage_nums = re.findall(r"\b\d+(?:\.\d+)?\b", p_lower)
+                if claim_nums and passage_nums:
+                    claim_val = float(claim_nums[0])
+                    passage_val = float(passage_nums[0])
+                    if claim_val == passage_val:
+                        return Assessment(
+                            assessment_id=assessment_id,
+                            claim_id=claim.claim_id,
+                            ref_id=source.ref_id,
+                            assessment_status=AssessmentStatus.assessed,
+                            semantic_verdict=SemanticVerdict.SUPPORTED,
+                            evidence_passage_ids=[passage.passage_id],
+                            explanation=f"Source passage confirms {claim_metric} of {passage_val} {claim_unit} in {claim_pop}: '{passage.verbatim_text.strip()}'.",
+                            issue_flags=issue_flags,
+                            human_review_status=HumanReviewStatus.pending,
+                            confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
+                            confidence_basis=f"Strict numerical comparator rule ({coverage_str}).",
+                        )
+                    else:
+                        return Assessment(
+                            assessment_id=assessment_id,
+                            claim_id=claim.claim_id,
+                            ref_id=source.ref_id,
+                            assessment_status=AssessmentStatus.assessed,
+                            semantic_verdict=SemanticVerdict.CONTRADICTORY,
+                            evidence_passage_ids=[passage.passage_id],
+                            explanation=f"Source reports {claim_metric} of {passage_val} {claim_unit} in {claim_pop}, contradicting the claimed {claim_val} {claim_unit}.",
+                            issue_flags=issue_flags,
+                            human_review_status=HumanReviewStatus.pending,
+                            confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
+                            confidence_basis=f"Strict numerical comparator rule ({coverage_str}).",
+                        )
+
+            rise_match_claim = re.search(r"(\d+)%?\s*(?:to|rose from \d+%\s*to)\s*(\d+)%?", c_lower)
+            rise_match_pass = re.search(r"(\d+)%?\s*(?:to|rose from \d+%\s*to)\s*(\d+)%?", p_lower)
+            if rise_match_claim and rise_match_pass:
+                if rise_match_claim.groups() == rise_match_pass.groups():
+                    return Assessment(
+                        assessment_id=assessment_id,
+                        claim_id=claim.claim_id,
+                        ref_id=source.ref_id,
+                        assessment_status=AssessmentStatus.assessed,
+                        semantic_verdict=SemanticVerdict.SUPPORTED,
+                        evidence_passage_ids=[passage.passage_id],
+                        explanation=f"Source confirms accuracy rose from {rise_match_pass.group(1)}% to {rise_match_pass.group(2)}% in {claim_pop}: '{passage.verbatim_text.strip()}'.",
+                        issue_flags=issue_flags,
+                        human_review_status=HumanReviewStatus.pending,
+                        confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
+                        confidence_basis=f"Strict numerical comparator rule ({coverage_str}).",
+                    )
+                else:
+                    return Assessment(
+                        assessment_id=assessment_id,
+                        claim_id=claim.claim_id,
+                        ref_id=source.ref_id,
+                        assessment_status=AssessmentStatus.assessed,
+                        semantic_verdict=SemanticVerdict.CONTRADICTORY,
+                        evidence_passage_ids=[passage.passage_id],
+                        explanation=f"Source reports change from {rise_match_pass.group(1)}% to {rise_match_pass.group(2)}%, contradicting claim.",
+                        issue_flags=issue_flags,
+                        human_review_status=HumanReviewStatus.pending,
+                        confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
+                        confidence_basis=f"Strict numerical comparator rule ({coverage_str}).",
+                    )
+
+    # When classifier is unavailable and no strict numerical rule matches, return unable_to_assess
     return Assessment(
         assessment_id=assessment_id,
         claim_id=claim.claim_id,
         ref_id=source.ref_id,
-        assessment_status=status,
-        semantic_verdict=verdict,
-        evidence_passage_ids=[passages[0].passage_id] if passages else [],
-        explanation=explanation,
+        assessment_status=AssessmentStatus.unable_to_assess,
+        semantic_verdict=None,
+        evidence_passage_ids=[],
+        explanation="Unable to assess: active classifier or exact quantitative comparator required.",
         issue_flags=issue_flags,
         human_review_status=HumanReviewStatus.pending,
-        confidence_score=confidence,
-        confidence_basis=f"Lexical baseline heuristic ({coverage_str}).",
+        confidence_score=None,
+        confidence_basis=f"No matching quantitative or semantic verification available ({coverage_str}).",
     )
 
 
