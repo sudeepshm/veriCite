@@ -94,16 +94,64 @@ async def agris(client, query, limit=5):
     # Use OpenAlex for agricultural discovery until an approved AGRIS API is configured.
     raise NotImplementedError("AGRIS connector requires a verified API contract")
 
-async def unpaywall(client, doi):
-    email = os.getenv("UNPAYWALL_EMAIL")
-    if not email:
-        raise ValueError("UNPAYWALL_EMAIL must be configured")
-    data = await get_json(client, f"https://api.unpaywall.org/v2/{quote(doi, safe='')}",
-                          {"email": email})
-    best = data.get("best_oa_location") or {}
-    return {"doi": data.get("doi"), "is_oa": data.get("is_oa"),
-            "url_for_pdf": best.get("url_for_pdf"),
-            "url_for_landing_page": best.get("url_for_landing_page")}
+async def open_access_lookup(client: httpx.AsyncClient, doi: str) -> dict:
+    """Find open-access PDF and landing page via OpenAlex, falling back to Semantic Scholar."""
+    clean_doi = doi.removeprefix("https://doi.org/").strip()
+    if not clean_doi:
+        raise ValueError("DOI must be provided")
+
+    # 1. OpenAlex lookup
+    try:
+        params = {}
+        if os.getenv("OPENALEX_API_KEY"):
+            params["api_key"] = os.environ["OPENALEX_API_KEY"]
+        data = await get_json(
+            client,
+            f"https://api.openalex.org/works/https://doi.org/{clean_doi}",
+            params=params or None,
+        )
+        oa = data.get("open_access") or {}
+        best = data.get("best_oa_location") or {}
+        return {
+            "doi": data.get("doi") or f"https://doi.org/{clean_doi}",
+            "is_oa": oa.get("is_oa", False),
+            "url_for_pdf": best.get("pdf_url"),
+            "url_for_landing_page": best.get("landing_page_url"),
+            "source": "openalex",
+        }
+    except Exception:
+        pass
+
+    # 2. Semantic Scholar fallback
+    headers = {}
+    if os.getenv("SEMANTIC_SCHOLAR_API_KEY"):
+        headers["x-api-key"] = os.environ["SEMANTIC_SCHOLAR_API_KEY"]
+    try:
+        data = await get_json(
+            client,
+            f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}",
+            params={"fields": "openAccessPdf,url"},
+            headers=headers,
+        )
+        oa_pdf = data.get("openAccessPdf") or {}
+        pdf_url = oa_pdf.get("url")
+        return {
+            "doi": f"https://doi.org/{clean_doi}",
+            "is_oa": bool(pdf_url),
+            "url_for_pdf": pdf_url,
+            "url_for_landing_page": data.get("url"),
+            "source": "semantic_scholar",
+        }
+    except Exception:
+        pass
+
+    return {
+        "doi": f"https://doi.org/{clean_doi}",
+        "is_oa": False,
+        "url_for_pdf": None,
+        "url_for_landing_page": None,
+        "source": None,
+    }
 
 SEARCH_PROVIDERS = {
     "openalex": openalex, "semantic_scholar": semantic_scholar,

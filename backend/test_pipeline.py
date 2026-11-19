@@ -106,6 +106,34 @@ References
         self.assertEqual(report["total_references"], 1)
         self.assertEqual(report["total_pairs"], 2, "Require exactly 2 verification pairs")
 
+    async def test_numeric_gap_citation_does_not_fall_back_to_position(self):
+        """P0 Regression: When bibliography has explicit numeric labels [2], [3] and body cites [1],
+        [1] must NOT silently link to [2]. It must be unmatched with 0 verification pairs.
+        """
+        gap_text = """Classification trial report
+Draft manuscript
+
+Findings
+Accuracy increased significantly [1].
+
+References
+[2] Brown, C. (2025). Accuracy in trial two. Fixture Studies, 2, 1.
+[3] Davis, E. (2025). Accuracy in trial three. Fixture Studies, 3, 1.
+"""
+        doc_id, blocks, _ = await ingest_document(gap_text.encode("utf-8"), "gap.txt", "text/plain")
+        refs = parse_references(blocks)
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0].raw_marker, "[2]")
+        self.assertEqual(refs[1].raw_marker, "[3]")
+
+        claims, links, issues = await extract_claims_and_links(blocks, refs)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(len(links), 1)
+        # Must be unmatched, never silently linked to [2]
+        self.assertEqual(links[0].mapping_status, MappingStatus.unmatched)
+        self.assertEqual(links[0].ref_id, "")
+        self.assertTrue(any("unmatched citation marker '[1]'" in i for i in issues))
+
     async def test_flaw2_unrelated_manuscript_never_selects_dummy_source(self):
         """Flaw 2: With source-1.txt on disk, a different manuscript citing [1] must never select it."""
         unrelated_text = """Quantum Computing Benchmark
@@ -202,6 +230,41 @@ References
         self.assertEqual(asm3.assessment_status, AssessmentStatus.unable_to_assess)
         self.assertIsNone(asm3.semantic_verdict)
         self.assertEqual(asm3.evidence_passage_ids, [])
+
+        # 4. P0 Regression: Claim of 10-percentage-point gain against passage with 40 participants and 10 pp gain
+        claim4 = Claim(
+            claim_id="c4",
+            document_id="doc1",
+            block_id="b1",
+            original_span="The absolute accuracy gain was 10 percentage points in the adult pilot [1].",
+            normalized_text="The absolute accuracy gain was 10 percentage points in the adult pilot [1].",
+        )
+        passage_with_sample_size = [
+            Passage(
+                passage_id="p_sample",
+                source_id="src_test",
+                verbatim_text="In the adult pilot with 40 participants, the absolute accuracy gain was 10 percentage points.",
+                section="Results",
+            )
+        ]
+        asm4 = await assess_claim_reference_pair(claim4, source, passage_with_sample_size)
+        self.assertEqual(asm4.semantic_verdict, SemanticVerdict.SUPPORTED, "Must compare 10 pp with 10 pp, not 40 participants")
+        self.assertEqual(asm4.evidence_passage_ids, ["p_sample"])
+        self.assertIn("confirms absolute accuracy gain of 10 percentage points", asm4.explanation)
+        self.assertNotIn("reports absolute accuracy gain of 40", asm4.explanation)
+
+        # 5. Ambiguous association with multiple percentage points in passage -> unable_to_assess
+        passage_ambiguous = [
+            Passage(
+                passage_id="p_ambig",
+                source_id="src_test",
+                verbatim_text="In the adult pilot, the absolute accuracy gain was 10 percentage points in phase 1 and 20 percentage points in phase 2.",
+                section="Results",
+            )
+        ]
+        asm5 = await assess_claim_reference_pair(claim4, source, passage_ambiguous)
+        self.assertEqual(asm5.assessment_status, AssessmentStatus.unable_to_assess, "Ambiguous association must return unable_to_assess")
+        self.assertIsNone(asm5.semantic_verdict)
 
     async def test_flaw3_stage5_check_rejects_assessed_without_valid_evidence_passages(self):
         """Stage 5 check: Require at least one validated passage from designated source before returning assessed."""

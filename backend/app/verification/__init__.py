@@ -21,6 +21,38 @@ from app.config import GEMINI_API_KEY
 logger = logging.getLogger(__name__)
 
 
+def _extract_metric_quantity(text: str, unit: str) -> float | None:
+    """Extract the specific numeric value that binds directly to *unit*.
+
+    If no number binds to the unit, or if the association is ambiguous, returns None.
+    """
+    t_lower = text.lower()
+    if unit == "percentage points":
+        # Match number directly associated with percentage points / percentage-point
+        # e.g., "10 percentage points", "10-percentage-point", "gain was 10 percentage points"
+        matches = re.findall(
+            r"\b(\d+(?:\.\d+)?)\s*(?:-|–|\s)?(?:percentage points?|percentage-points?)\b",
+            t_lower,
+        )
+        if len(matches) == 1:
+            return float(matches[0])
+        rev = re.findall(
+            r"\b(?:percentage points?)\s*[:=]?\s*(\d+(?:\.\d+)?)\b",
+            t_lower,
+        )
+        if len(rev) == 1 and not matches:
+            return float(rev[0])
+        return None
+
+    if unit in ("%", "percent"):
+        matches = re.findall(r"\b(\d+(?:\.\d+)?)\s*(?:%|percent)\b", t_lower)
+        if len(matches) == 1:
+            return float(matches[0])
+        return None
+
+    return None
+
+
 async def assess_claim_reference_pair(
     claim: Claim,
     source: ResolvedSource,
@@ -177,11 +209,9 @@ async def assess_claim_reference_pair(
                 continue
 
             if claim_unit == "percentage points" and "percentage points" in p_lower:
-                claim_nums = re.findall(r"\b\d+(?:\.\d+)?\b", c_lower)
-                passage_nums = re.findall(r"\b\d+(?:\.\d+)?\b", p_lower)
-                if claim_nums and passage_nums:
-                    claim_val = float(claim_nums[0])
-                    passage_val = float(passage_nums[0])
+                claim_val = _extract_metric_quantity(c_lower, claim_unit)
+                passage_val = _extract_metric_quantity(p_lower, claim_unit)
+                if claim_val is not None and passage_val is not None:
                     if claim_val == passage_val:
                         return Assessment(
                             assessment_id=assessment_id,
@@ -190,7 +220,7 @@ async def assess_claim_reference_pair(
                             assessment_status=AssessmentStatus.assessed,
                             semantic_verdict=SemanticVerdict.SUPPORTED,
                             evidence_passage_ids=[passage.passage_id],
-                            explanation=f"Source passage confirms {claim_metric} of {passage_val} {claim_unit} in {claim_pop}: '{passage.verbatim_text.strip()}'.",
+                            explanation=f"Source passage confirms {claim_metric} of {passage_val:g} {claim_unit} in {claim_pop}: '{passage.verbatim_text.strip()}'.",
                             issue_flags=issue_flags,
                             human_review_status=HumanReviewStatus.pending,
                             confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
@@ -204,7 +234,7 @@ async def assess_claim_reference_pair(
                             assessment_status=AssessmentStatus.assessed,
                             semantic_verdict=SemanticVerdict.CONTRADICTORY,
                             evidence_passage_ids=[passage.passage_id],
-                            explanation=f"Source reports {claim_metric} of {passage_val} {claim_unit} in {claim_pop}, contradicting the claimed {claim_val} {claim_unit}.",
+                            explanation=f"Source reports {claim_metric} of {passage_val:g} {claim_unit} in {claim_pop}, contradicting the claimed {claim_val:g} {claim_unit}.",
                             issue_flags=issue_flags,
                             human_review_status=HumanReviewStatus.pending,
                             confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,

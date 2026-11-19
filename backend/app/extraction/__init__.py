@@ -242,9 +242,16 @@ def detect_citation_markers(
     # Build lookup indices
     # Numeric marker → ref_id
     marker_to_ref: dict[str, str] = {}
+    has_explicit_numeric = False
     for ref in refs:
         if ref.raw_marker:
-            marker_to_ref[ref.raw_marker] = ref.ref_id
+            cleaned = ref.raw_marker.strip()
+            marker_to_ref[cleaned] = ref.ref_id
+            m_num = re.match(r"^\[?(\d+)\]?$", cleaned)
+            if m_num:
+                has_explicit_numeric = True
+                marker_to_ref[f"[{m_num.group(1)}]"] = ref.ref_id
+                marker_to_ref[m_num.group(1)] = ref.ref_id
 
     # 1) Numeric citations
     for m in _NUMERIC_CITE_RE.finditer(text):
@@ -255,7 +262,7 @@ def detect_citation_markers(
             key = f"[{n}]"
             if key in marker_to_ref:
                 matched_ids.append(marker_to_ref[key])
-            elif 1 <= n <= len(refs):
+            elif not has_explicit_numeric and 1 <= n <= len(refs):
                 matched_ids.append(refs[n - 1].ref_id)
         results.append((marker_text, m.start(), m.end(), matched_ids))
 

@@ -20,13 +20,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/evidence/search?q=learning&providers=wrong').status_code, 400)
 
     def test_open_access_timeout(self):
-        with patch('main.unpaywall', new=AsyncMock(side_effect=httpx.ReadTimeout('timeout'))):
+        with patch('main.open_access_lookup', new=AsyncMock(side_effect=httpx.ReadTimeout('timeout'))):
             response = self.client.get('/api/evidence/open-access?doi=10.1/test')
         self.assertEqual(response.status_code, 502)
         self.assertIn('retry', response.json()['detail'])
 
     def test_missing_configuration(self):
-        with patch('main.unpaywall', new=AsyncMock(side_effect=ValueError('UNPAYWALL_EMAIL must be configured'))):
+        with patch('main.open_access_lookup', new=AsyncMock(side_effect=ValueError('DOI must be provided'))):
             self.assertEqual(self.client.get('/api/evidence/open-access?doi=10.1/test').status_code, 400)
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):

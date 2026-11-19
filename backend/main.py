@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
 
-from integrations.providers import SEARCH_PROVIDERS, search_all, unpaywall
+from integrations.providers import SEARCH_PROVIDERS, search_all, open_access_lookup
 from app.pipeline import create_job, run_pipeline
 from app.database import init_db, get_job, get_claims, get_references, get_all_assessments
 from app.models import JobState
@@ -32,7 +32,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http
 class VerifyRequest(BaseModel):
     text: str
     filename: str = "document.txt"
-    test_source_map: dict[str, str] | None = None
 
 
 # --------------- Existing endpoints ---------------
@@ -56,14 +55,14 @@ async def evidence_search(q: str = Query(min_length=3, max_length=500),
 @app.get("/api/evidence/open-access")
 async def open_access(doi: str = Query(min_length=3, max_length=250)):
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            return await unpaywall(client, doi.removeprefix("https://doi.org/"))
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            return await open_access_lookup(client, doi.removeprefix("https://doi.org/"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=f"Unpaywall returned HTTP {exc.response.status_code}") from exc
+        raise HTTPException(status_code=502, detail=f"Provider returned HTTP {exc.response.status_code}") from exc
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail="Unpaywall is temporarily unreachable; please retry.") from exc
+        raise HTTPException(status_code=502, detail="Open access service is temporarily unreachable; please retry.") from exc
 
 
 @app.get("/health")
@@ -77,7 +76,7 @@ def liveness() -> dict[str, str]:
 async def verify(req: VerifyRequest):
     content = req.text.encode("utf-8")
     job = create_job(req.filename, "text/plain")
-    asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain", test_resolver=req.test_source_map))
+    asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain"))
     return {"job_id": job.job_id, "status": "queued"}
 
 
