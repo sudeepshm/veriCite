@@ -70,8 +70,36 @@ def _candidate_score(
     cand_year: int | None,
 ) -> float:
     ts = _title_similarity(ref.title, cand_title)
+
+    # If title wasn't cleanly extracted or similarity is low, try raw_entry substring matching
+    if (not ref.title or ts < 0.4) and cand_title and ref.raw_entry:
+        raw_lower = ref.raw_entry.lower()
+        raw_clean = raw_lower.replace("\ufb01", "fi").replace("\ufb02", "fl")
+        raw_clean = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", raw_clean)
+        raw_clean = re.sub(r"\s+", " ", raw_clean)
+        cand_lower = cand_title.lower()
+        if cand_lower in raw_clean:
+            ts = max(ts, 0.92)
+        else:
+            # Keyword overlap: significant words (>3 chars) in candidate title vs raw entry
+            cand_words = [w for w in re.findall(r"\w+", cand_lower) if len(w) > 3]
+            if cand_words:
+                hits = sum(1 for w in cand_words if w in raw_clean)
+                word_ratio = hits / len(cand_words)
+                if word_ratio >= 0.75:
+                    ts = max(ts, 0.80 * word_ratio)
+
     ys = _year_score(ref.year, cand_year)
     ao = _author_jaccard(ref.authors, cand_authors)
+
+    # Boost: if primary author surname matches, give extra weight (catches "Simonyan" -tagged wrong title)
+    if ref.authors and cand_authors:
+        ref_surnames = _extract_surnames(ref.authors)
+        cand_surnames = _extract_surnames(cand_authors)
+        if not (ref_surnames & cand_surnames):
+            # Primary author mismatch — penalise ambiguous result
+            ao = ao * 0.5
+
     return 0.5 * ts + 0.3 * ys + 0.2 * ao
 
 
@@ -205,12 +233,20 @@ async def _crossref_bib_search(
     ref: Reference, client: httpx.AsyncClient
 ) -> tuple[IdentityStatus, str | None, list[str], int | None, str | None, str | None, str | None]:
     """Return (status, title, authors, year, canonical_doi, content_url, abstract)."""
-    query_parts = [ref.title or ""]
-    if ref.authors:
-        query_parts.extend(ref.authors[:2])
-    if ref.year:
-        query_parts.append(str(ref.year))
-    query = " ".join(p for p in query_parts if p).strip()
+    if ref.title and len(ref.title) > 6:
+        query_parts = [ref.title]
+        if ref.authors:
+            query_parts.extend(ref.authors[:2])
+        if ref.year:
+            query_parts.append(str(ref.year))
+        query = " ".join(p for p in query_parts if p).strip()
+    else:
+        # Fallback to normalized raw entry without markers
+        raw = ref.raw_entry or ""
+        raw = raw.replace("\ufb00", "ff").replace("\ufb01", "fi").replace("\ufb02", "fl")
+        raw = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", raw)
+        raw = re.sub(r"^\[?\d+\]?\.?\s*", "", raw)
+        query = re.sub(r"\s+", " ", raw).strip()
 
     cache_key = f"bib:{query.lower()}"
     if cache_key in _CROSSREF_CACHE:
@@ -253,14 +289,20 @@ async def _crossref_bib_search(
     best_score = 0.0
     best_item: dict | None = None
     second_best_score = 0.0
+    best_author_overlap = False
 
     for item in items:
         cand_title, cand_authors, cand_year, _, _, _ = _parse_crossref_work(item)
         score = _candidate_score(ref, cand_title, cand_authors, cand_year)
+        # Track whether best candidate has author surname overlap with reference
+        ref_surnames = _extract_surnames(ref.authors)
+        cand_surnames = _extract_surnames(cand_authors)
+        has_author_overlap = bool(ref_surnames & cand_surnames)
         if score > best_score:
             second_best_score = best_score
             best_score = score
             best_item = item
+            best_author_overlap = has_author_overlap
         elif score > second_best_score:
             second_best_score = score
 
@@ -269,12 +311,24 @@ async def _crossref_bib_search(
 
     title, authors, year, canonical_doi, content_url, abstract = _parse_crossref_work(best_item)
 
+    # Require author surname overlap for confident match; without it, stay unresolved
+    # (catches e.g. VGGNet which isn't in Crossref: a "very deep convolutional" paper by wrong authors)
+    if ref.authors and not best_author_overlap:
+        # Check if any candidate author surname appears in the raw bibliography entry
+        cand_surnames = _extract_surnames(authors)
+        raw_lower = (ref.raw_entry or "").lower()
+        surname_in_raw = any(s in raw_lower for s in cand_surnames if len(s) > 2)
+        if not surname_in_raw:
+            entry = {"status": IdentityStatus.unresolved}
+            _CROSSREF_CACHE[cache_key] = entry
+            return IdentityStatus.unresolved, None, [], None, None, None, None
+
     # Ambiguity check: high similarity on multiple candidates
-    if best_score >= 0.7 and (best_score - second_best_score) < 0.1 and second_best_score >= 0.65:
+    if best_score >= 0.75 and (best_score - second_best_score) < 0.1 and second_best_score >= 0.68:
         status = IdentityStatus.ambiguous
-    elif best_score > 0.7:
+    elif best_score > 0.75:
         status = IdentityStatus.matched
-    elif best_score >= 0.5:
+    elif best_score >= 0.55:
         status = IdentityStatus.ambiguous
     else:
         status = IdentityStatus.unresolved
@@ -456,8 +510,10 @@ async def resolve_all_references(
     client: httpx.AsyncClient | None = None,
     test_resolver: Any | None = None,
 ) -> list[ResolvedSource]:
-    """Resolve all references with deduplication and concurrency limit of 3."""
-    sem = asyncio.Semaphore(3)
+    """Resolve all references with deduplication and sequential rate-limited Crossref queries."""
+    # Crossref polite pool: 1 concurrent request + 350ms delay between requests
+    # avoids 429/lookup_failed on batches of 49 references
+    sem = asyncio.Semaphore(1)
 
     unique: dict[str, Reference] = {}
     duplicates: dict[str, list[str]] = {}
@@ -476,6 +532,7 @@ async def resolve_all_references(
     async def _resolve_one(key: str, ref: Reference, http_client: httpx.AsyncClient) -> None:
         async with sem:
             resolved = await resolve_reference(ref, http_client, test_resolver=test_resolver)
+            await asyncio.sleep(0.35)  # polite delay – Crossref asks < 50 req/s
         cache[key] = resolved
         results.append(resolved)
         for dup_ref_id in duplicates[key]:
@@ -487,6 +544,10 @@ async def resolve_all_references(
             )
             results.append(dup)
 
+    _polite_headers = {
+        "User-Agent": f"veriCite/1.0 (mailto:{CROSSREF_MAILTO or 'user@verycite.app'}; tool; https://verycite.app)"
+    }
+
     if client is not None:
         tasks = [
             asyncio.create_task(_resolve_one(key, ref, client))
@@ -494,7 +555,7 @@ async def resolve_all_references(
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        async with httpx.AsyncClient(follow_redirects=True) as local_client:
+        async with httpx.AsyncClient(follow_redirects=True, headers=_polite_headers, timeout=35.0) as local_client:
             tasks = [
                 asyncio.create_task(_resolve_one(key, ref, local_client))
                 for key, ref in unique.items()

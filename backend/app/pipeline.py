@@ -51,7 +51,7 @@ from app.resolution import resolve_all_references
 from app.retrieval import retrieve_source
 from app.verification import assess_claim_reference_pair
 from app.reporting import build_report
-from app.config import PROVIDER_TIMEOUT
+from app.config import PROVIDER_TIMEOUT, CROSSREF_MAILTO
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +122,8 @@ async def run_pipeline(
     """
     stage_errors: list[str] = []
 
+    _POLITE_UA = f"veriCite/1.0 (mailto:{CROSSREF_MAILTO or 'user@verycite.app'}; tool; https://verycite.app)"
+
     # ------------------------------------------------------------------
     # Helper: persist job state changes
     # ------------------------------------------------------------------
@@ -174,7 +176,12 @@ async def run_pipeline(
         update_job(3, JobState.running)
         resolved_sources: list[ResolvedSource] = []
         try:
-            resolved_sources = await resolve_all_references(refs, test_resolver=test_resolver)
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=35.0,
+                headers={"User-Agent": _POLITE_UA},
+            ) as cr_client:
+                resolved_sources = await resolve_all_references(refs, client=cr_client, test_resolver=test_resolver)
             for src in resolved_sources:
                 save_resolved_source(src)
         except Exception as e:
@@ -198,7 +205,8 @@ async def run_pipeline(
             async with httpx.AsyncClient(
                 timeout=PROVIDER_TIMEOUT,
                 follow_redirects=True,
-                max_redirects=3,
+                max_redirects=5,
+                headers={"User-Agent": _POLITE_UA},
             ) as client:
 
                 async def retrieve_one(src: ResolvedSource) -> None:

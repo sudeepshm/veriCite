@@ -70,13 +70,17 @@ def liveness() -> dict[str, str]:
     return {"status": "ok"}
 
 
+_BACKGROUND_TASKS = set()
+
 # --------------- Verification endpoints ---------------
 
 @app.post("/api/verify")
 async def verify(req: VerifyRequest):
     content = req.text.encode("utf-8")
     job = create_job(req.filename, "text/plain")
-    asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain"))
+    task = asyncio.create_task(run_pipeline(job.job_id, content, req.filename, "text/plain"))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return {"job_id": job.job_id, "status": "queued"}
 
 
@@ -88,7 +92,9 @@ async def verify_upload(file: UploadFile = File(...)):
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
     job = create_job(filename, content_type)
-    asyncio.create_task(run_pipeline(job.job_id, content, filename, content_type))
+    task = asyncio.create_task(run_pipeline(job.job_id, content, filename, content_type))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return {"job_id": job.job_id, "status": "queued"}
 
 

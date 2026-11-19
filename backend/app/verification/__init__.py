@@ -18,6 +18,29 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Local NLI Model Cache
+# ---------------------------------------------------------------------------
+_nli_tokenizer = None
+_nli_model = None
+
+
+def _get_nli_model():
+    """Lazily load the local cross-encoder NLI model."""
+    global _nli_tokenizer, _nli_model
+    if _nli_model is None:
+        try:
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+            model_name = "cross-encoder/nli-deberta-v3-small"
+            _nli_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            _nli_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+            _nli_model.eval()
+        except Exception as e:
+            logger.warning(f"Could not load local NLI model: {e}")
+            return None, None
+    return _nli_tokenizer, _nli_model
+
 
 def _has_negation(text: str) -> bool:
     """Check if *text* contains explicit negation markers."""
@@ -331,6 +354,79 @@ async def assess_claim_reference_pair(
                         confidence_score=0.9 if source.coverage == CoverageStatus.full_text else 0.7,
                         confidence_basis=f"Strict numerical comparator rule ({coverage_str}).",
                     )
+
+    # When passages exist but the strict numerical comparator did not match:
+    # Run the local DeBERTa-v3 NLI cross-encoder model to determine semantic entailment or contradiction.
+    if passages:
+        tok, nli_model = _get_nli_model()
+        if tok is not None and nli_model is not None:
+            best_verdict = None
+            best_score = 0.0
+            best_passage = None
+            claim_text = claim.normalized_text.strip()
+
+            claim_words = set(re.findall(r"\b[a-z]{4,}\b", claim_text.lower())) - {"with", "that", "this", "from", "have", "were", "been", "also", "such"}
+            for p in passages[:5]:
+                p_text = p.verbatim_text.strip()
+                if len(p_text) < 25:
+                    continue
+                # Require passage to share at least 2 topic content words with claim to avoid spurious NLI on author names/headers
+                p_words = set(re.findall(r"\b[a-z]{4,}\b", p_text.lower()))
+                overlap = claim_words & p_words
+                if len(overlap) < 2:
+                    continue
+
+                try:
+                    import torch
+                    inp = tok(p_text, claim_text, return_tensors="pt", truncation=True, max_length=512)
+                    with torch.no_grad():
+                        logits = nli_model(**inp).logits
+                        probs = torch.softmax(logits, dim=1)[0].tolist()
+                    # Label mapping: 0 -> contradiction, 1 -> entailment, 2 -> neutral
+                    entail_p = probs[1]
+                    contra_p = probs[0]
+
+                    if entail_p >= 0.75 and entail_p > best_score:
+                        best_score = entail_p
+                        best_verdict = SemanticVerdict.SUPPORTED
+                        best_passage = p
+                    elif contra_p >= 0.85 and contra_p > best_score:
+                        best_score = contra_p
+                        best_verdict = SemanticVerdict.CONTRADICTORY
+                        best_passage = p
+                except Exception as ex:
+                    logger.debug(f"NLI evaluation failed on passage: {ex}")
+
+            if best_verdict is not None and best_passage is not None:
+                verdict_str = "confirms" if best_verdict == SemanticVerdict.SUPPORTED else "contradicts"
+                return Assessment(
+                    assessment_id=assessment_id,
+                    claim_id=claim.claim_id,
+                    ref_id=source.ref_id,
+                    assessment_status=AssessmentStatus.assessed,
+                    semantic_verdict=best_verdict,
+                    evidence_passage_ids=[best_passage.passage_id],
+                    explanation=f"Local NLI model {verdict_str} claim ({best_score:.0%} confidence): '{best_passage.verbatim_text.strip()}'.",
+                    issue_flags=issue_flags,
+                    human_review_status=HumanReviewStatus.pending,
+                    confidence_score=round(best_score, 2),
+                    confidence_basis=f"Local DeBERTa-v3 NLI cross-encoder ({coverage_str}).",
+                )
+
+        # If NLI was neutral or inconclusive, report evidence found for human review:
+        return Assessment(
+            assessment_id=assessment_id,
+            claim_id=claim.claim_id,
+            ref_id=source.ref_id,
+            assessment_status=AssessmentStatus.unable_to_assess,
+            semantic_verdict=None,
+            evidence_passage_ids=[p.passage_id for p in passages[:3]],
+            explanation="Evidence found — human review required.",
+            issue_flags=["qualitative_evidence_review", *issue_flags],
+            human_review_status=HumanReviewStatus.pending,
+            confidence_score=None,
+            confidence_basis=f"Cited source evidence retrieved ({coverage_str}); qualitative claim requires human review.",
+        )
 
     # When classifier is unavailable and no strict numerical rule matches, return unable_to_assess
     return Assessment(

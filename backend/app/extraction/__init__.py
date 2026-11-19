@@ -177,21 +177,30 @@ def _extract_year(entry: str) -> int | None:
     return int(m.group(0)) if m else None
 
 
+def _clean_ref_text(text: str) -> str:
+    """Normalize ligatures, hyphenated line breaks, and whitespace."""
+    text = text.replace("\ufb00", "ff").replace("\ufb01", "fi").replace("\ufb02", "fl").replace("\ufb03", "ffi").replace("\ufb04", "ffl")
+    text = text.replace("–", "-").replace("—", "-").replace("’", "'").replace("”", '"').replace("“", '"')
+    text = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _extract_authors(entry: str, year: int | None) -> list[str]:
-    """Heuristic: take text before the year (or first period) as authors."""
-    # Strip leading marker
-    text = re.sub(r"^\[?\d+\]?\.?\s*", "", entry.strip())
-    if year:
+    """Extract authors from a reference entry."""
+    cleaned = _clean_ref_text(entry)
+    text = re.sub(r"^\[?\d+\]?\.?\s*", "", cleaned)
+
+    # Strategy 1: Check standard period delimiter not preceded by a single initial (e.g. "Y. Bengio, P. Simard, and P. Frasconi.")
+    parts = re.split(r"(?<!\b[A-Z])\.\s+", text)
+    if len(parts) >= 2:
+        author_part = parts[0]
+    elif year:
         idx = text.find(str(year))
-        if idx > 0:
-            author_part = text[:idx]
-        else:
-            author_part = text.split(".")[0]
+        author_part = text[:idx] if idx > 0 else text.split(".")[0]
     else:
         author_part = text.split(".")[0]
 
-    # Split on ; or , but keep name units together
-    # Heuristic: each author is "Lastname, Initials" or "Firstname Lastname"
     raw_names = re.split(r";\s*|\band\b", author_part)
     authors: list[str] = []
     for name in raw_names:
@@ -202,22 +211,28 @@ def _extract_authors(entry: str, year: int | None) -> list[str]:
 
 
 def _extract_title(entry: str, authors: list[str], year: int | None) -> str | None:
-    """Heuristic title extraction: text between year and journal/DOI."""
-    text = entry
-    # Remove leading marker
-    text = re.sub(r"^\[?\d+\]?\.?\s*", "", text.strip())
+    """Extract title from a reference entry."""
+    cleaned = _clean_ref_text(entry)
+    text = re.sub(r"^\[?\d+\]?\.?\s*", "", cleaned)
 
     # Try quoted title
-    m = re.search(r'"([^"]{10,})"', text)
+    m = re.search(r'"([^"]{6,})"', text)
     if m:
         return m.group(1).strip()
 
-    # After year, take up to next period or volume indicator
+    # Standard "Authors. Title. Venue, Year." split
+    parts = re.split(r"(?<!\b[A-Z])\.\s+", text)
+    if len(parts) >= 2:
+        candidate = parts[1].strip().rstrip(".,")
+        # Ensure it's not just a year or single token
+        if len(candidate) > 5 and not re.match(r"^(19|20)\d\d$", candidate):
+            return candidate
+
+    # Fallback: After year, take up to next period or volume indicator
     if year:
         idx = text.find(str(year))
         if idx >= 0:
             after_year = text[idx + 4:].lstrip(".,: ")
-            # Title ends at next period (but not initials) or at DOI
             title_candidate = re.split(r"\.\s+[A-Z]", after_year)
             if title_candidate:
                 candidate = title_candidate[0].strip().rstrip(".,")
