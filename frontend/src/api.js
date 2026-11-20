@@ -1,4 +1,5 @@
-const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) || '';
+const rawBase = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) || '';
+const API_BASE = rawBase.replace(/\/+$/, '');
 
 async function request(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, options);

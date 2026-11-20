@@ -154,3 +154,9 @@ async def verify_report(job_id: str):
     if job.job_state != JobState.completed and job.job_state != "completed":
         raise HTTPException(status_code=400, detail="Job has not completed yet")
     return job.report
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "10000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
