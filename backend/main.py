@@ -63,6 +63,18 @@ class VerifyRequest(BaseModel):
 
 # --------------- Existing endpoints ---------------
 
+@app.get("/")
+@app.head("/")
+def root():
+    return {
+        "name": "veriCite Evidence API",
+        "status": "online",
+        "version": "0.1.0",
+        "health": "/api/health",
+        "docs": "/docs",
+    }
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "providers": list(SEARCH_PROVIDERS)}
