@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: vericite-backend
+    runtime: python
+    rootDir: backend
+    plan: starter # or free (starter recommended for ML models: 1 CPU, 1GB RAM)
+    region: oregon # or frankfurt, ohio, singapore
+    buildCommand: "pip install --upgrade pip && pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: CROSSREF_MAILTO
+        value: "academic-verification@vericite.org"
+      - key: CROSSREF_RETRIEVE_TIMEOUT
+        value: "10.0"

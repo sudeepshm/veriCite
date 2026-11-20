@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
 
+import os
 from integrations.providers import SEARCH_PROVIDERS, search_all, open_access_lookup
 from app.pipeline import create_job, run_pipeline
 from app.database import init_db, get_job, get_claims, get_references, get_all_assessments
@@ -38,8 +39,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="veriCite Evidence API", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://localhost:5173"],
-                   allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "*")
+origins = [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+if not origins or "*" in origins:
+    origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --------------- Pydantic models ---------------
