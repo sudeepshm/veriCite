@@ -93,6 +93,18 @@ async def _fetch_abstract_crossref(canonical_doi: str | None, client: httpx.Asyn
     if not canonical_doi:
         return None
     clean_doi = canonical_doi.removeprefix("https://doi.org/").strip()
+    try:
+        from app.database import get_cached_crossref, set_cached_crossref
+        cached = get_cached_crossref(clean_doi)
+        if cached and isinstance(cached, dict):
+            raw_abstract = cached.get("abstract")
+            if raw_abstract:
+                cleaned = re.sub(r"<[^>]+>", " ", raw_abstract)
+                cleaned = re.sub(r"\s+", " ", cleaned).strip()
+                return cleaned or None
+    except Exception:
+        pass
+
     url = f"https://api.crossref.org/works/{clean_doi}"
     params: dict = {}
     if CROSSREF_MAILTO:
@@ -101,6 +113,10 @@ async def _fetch_abstract_crossref(canonical_doi: str | None, client: httpx.Asyn
         resp = await client.get(url, params=params, timeout=PROVIDER_TIMEOUT)
         if resp.status_code == 200:
             data = resp.json().get("message", {})
+            try:
+                set_cached_crossref(clean_doi, data)
+            except Exception:
+                pass
             raw_abstract = data.get("abstract")
             if raw_abstract:
                 cleaned = re.sub(r"<[^>]+>", " ", raw_abstract)

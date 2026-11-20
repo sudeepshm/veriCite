@@ -17,6 +17,7 @@ from app.config import (
     CROSSREF_MAILTO,
     PROVIDER_TIMEOUT,
 )
+from app.database import get_cached_crossref, set_cached_crossref
 from app.models import CoverageStatus, IdentityStatus, Reference, ResolvedSource
 
 # ---------------------------------------------------------------------------
@@ -167,8 +168,9 @@ async def _crossref_doi_lookup(
     """Return (status, mismatch_note, title, authors, year, canonical_doi, content_url, abstract)."""
     clean_doi = doi.removeprefix("https://doi.org/").strip()
     cache_key = f"doi:{clean_doi.lower()}"
-    if cache_key in _CROSSREF_CACHE:
-        c = _CROSSREF_CACHE[cache_key]
+    c = _CROSSREF_CACHE.get(cache_key) or get_cached_crossref(cache_key)
+    if c:
+        _CROSSREF_CACHE[cache_key] = c
         return (
             c["status"],
             c.get("mismatch_note"),
@@ -222,6 +224,7 @@ async def _crossref_doi_lookup(
         "abstract": abstract,
     }
     _CROSSREF_CACHE[cache_key] = entry
+    set_cached_crossref(cache_key, entry)
     return IdentityStatus.matched, None, title, authors, year, canonical_doi or clean_doi, content_url, abstract
 
 
@@ -249,8 +252,9 @@ async def _crossref_bib_search(
         query = re.sub(r"\s+", " ", raw).strip()
 
     cache_key = f"bib:{query.lower()}"
-    if cache_key in _CROSSREF_CACHE:
-        c = _CROSSREF_CACHE[cache_key]
+    c = _CROSSREF_CACHE.get(cache_key) or get_cached_crossref(cache_key)
+    if c:
+        _CROSSREF_CACHE[cache_key] = c
         return (
             c["status"],
             c.get("title"),
@@ -284,6 +288,7 @@ async def _crossref_bib_search(
     if not items:
         entry = {"status": IdentityStatus.unresolved}
         _CROSSREF_CACHE[cache_key] = entry
+        set_cached_crossref(cache_key, entry)
         return IdentityStatus.unresolved, None, [], None, None, None, None
 
     best_score = 0.0
@@ -321,6 +326,7 @@ async def _crossref_bib_search(
         if not surname_in_raw:
             entry = {"status": IdentityStatus.unresolved}
             _CROSSREF_CACHE[cache_key] = entry
+            set_cached_crossref(cache_key, entry)
             return IdentityStatus.unresolved, None, [], None, None, None, None
 
     # Ambiguity check: high similarity on multiple candidates
@@ -343,6 +349,7 @@ async def _crossref_bib_search(
         "abstract": abstract,
     }
     _CROSSREF_CACHE[cache_key] = entry
+    set_cached_crossref(cache_key, entry)
     return status, title, authors, year, canonical_doi, content_url, abstract
 
 
@@ -532,7 +539,6 @@ async def resolve_all_references(
     async def _resolve_one(key: str, ref: Reference, http_client: httpx.AsyncClient) -> None:
         async with sem:
             resolved = await resolve_reference(ref, http_client, test_resolver=test_resolver)
-            await asyncio.sleep(0.35)  # polite delay – Crossref asks < 50 req/s
         cache[key] = resolved
         results.append(resolved)
         for dup_ref_id in duplicates[key]:

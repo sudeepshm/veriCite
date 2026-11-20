@@ -19,6 +19,21 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Pre-warm embedding and NLI models in background thread so verification runs fast
+    def _warmup():
+        try:
+            from app.retrieval import get_embedding_model
+            get_embedding_model()
+        except Exception as e:
+            print("Embedding model warmup notice:", e)
+        try:
+            from app.verification import _get_nli_model
+            _get_nli_model()
+        except Exception as e:
+            print("NLI model warmup notice:", e)
+
+    import threading
+    threading.Thread(target=_warmup, daemon=True).start()
     yield
 
 

@@ -192,15 +192,15 @@ export function WorkspacePage({ state, setState, backendOnline }) {
   const pollJob = async (job_id, docTitle) => {
     setBusy(true);
     setStage(null);
-    setMessage('Verification started. Parsing document…');
+    setMessage('Verification started: Initializing pipeline…');
     localStorage.setItem('vericite_active_job_id', job_id);
 
     const stageNames = {
-      1: 'Parsing document…',
-      2: 'Extracting claims & references…',
-      3: 'Resolving references…',
-      4: 'Retrieving source passages…',
-      5: 'Verifying claims against evidence…'
+      1: 'Stage 1/5: Parsing manuscript document…',
+      2: 'Stage 2/5: Extracting claims & citation markers…',
+      3: 'Stage 3/5: Resolving references via Crossref…',
+      4: 'Stage 4/5: Retrieving evidence passages…',
+      5: 'Stage 5/5: Verifying claims with local NLI model…'
     };
 
     const poll = async () => {
@@ -388,7 +388,7 @@ export function WorkspacePage({ state, setState, backendOnline }) {
           return;
         }
 
-        setTimeout(poll, 2000);
+        setTimeout(poll, 800);
       } catch (err) {
         setMessage('Polling error: ' + err.message);
         setBusy(false);
@@ -621,15 +621,17 @@ export function WorkspacePage({ state, setState, backendOnline }) {
         </div>
 
         <div className="sidebar-bottom">
-          <BookOpen size={22} />
-          <strong>Current paper</strong>
-          <p>{state.analyzedTitle}</p>
+          <div className="sidebar-paper-label">
+            <BookOpen size={16} />
+            <strong>Current paper</strong>
+          </div>
+          <p title={state.analyzedTitle || 'No document loaded'}>{state.analyzedTitle || 'No document loaded'}</p>
         </div>
 
         <div className="profile">
-          <span>R</span>
-          <div>
-            Research workspace
+          <span className="profile-avatar">R</span>
+          <div className="profile-info">
+            <span className="profile-title">Research workspace</span>
             <small>Local browser session</small>
           </div>
         </div>

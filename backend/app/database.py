@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS assessments (
     job_id        TEXT,
     data          TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS crossref_cache (
+    cache_key TEXT PRIMARY KEY,
+    data      TEXT NOT NULL
+);
 """
 
 
@@ -498,6 +503,40 @@ def get_all_assessments(job_id: str) -> list[Assessment]:
     return [Assessment.model_validate_json(r["data"]) for r in assessment_rows]
 
 
+def get_cached_crossref(cache_key: str) -> dict | None:
+    """Retrieve cached Crossref query result from SQLite database."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT data FROM crossref_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+            if row:
+                return json.loads(row["data"])
+        except Exception:
+            pass
+        finally:
+            conn.close()
+    return None
+
+
+def set_cached_crossref(cache_key: str, data: dict) -> None:
+    """Persist Crossref query result into SQLite database."""
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO crossref_cache (cache_key, data) VALUES (?, ?)",
+                    (cache_key, json.dumps(data, default=str)),
+                )
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+
 __all__ = [
     "init_db",
     "set_job_document_id",
@@ -519,4 +558,6 @@ __all__ = [
     "save_assessment",
     "get_assessments",
     "get_all_assessments",
+    "get_cached_crossref",
+    "set_cached_crossref",
 ]
